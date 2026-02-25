@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="OsmDataAcquisition.csproj" />
+  <Project Path="SpeedLimits.Api/SpeedLimits.Api.csproj" />
+</Solution>

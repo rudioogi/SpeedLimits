@@ -8,6 +8,11 @@
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
+  <!-- Exclude the sibling API project folder from this project's compile glob -->
+  <ItemGroup>
+    <Compile Remove="SpeedLimits.Api\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="OsmSharp" Version="6.2.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />

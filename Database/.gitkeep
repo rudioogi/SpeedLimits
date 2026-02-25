@@ -1,0 +1,4 @@
+# This file ensures the Database folder is tracked by git
+# Place your .db files here:
+# - za_speedlimits.db
+# - au_speedlimits.db

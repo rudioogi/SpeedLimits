@@ -22,7 +22,8 @@ public class DatabaseBuilder
     /// <summary>
     /// Builds complete database from road segments
     /// </summary>
-    public void BuildDatabase(string databasePath, IEnumerable<RoadSegment> roadSegments)
+    public void BuildDatabase(string databasePath, IEnumerable<RoadSegment> roadSegments,
+        IReadOnlyList<PlaceNode>? placeNodes = null)
     {
         ConsoleProgressReporter.Report("Building SQLite database...");
 
@@ -47,8 +48,15 @@ public class DatabaseBuilder
         {
             var worldBounds = InsertRoadData(connection, roadSegments);
 
+            // Insert place data
+            var placeCount = 0;
+            if (placeNodes != null && placeNodes.Count > 0)
+            {
+                placeCount = InsertPlaceData(connection, placeNodes);
+            }
+
             // Insert metadata
-            InsertMetadata(connection, worldBounds);
+            InsertMetadata(connection, worldBounds, placeCount);
 
             transaction.Commit();
             ConsoleProgressReporter.Report("Transaction committed successfully");
@@ -110,17 +118,6 @@ public class DatabaseBuilder
                 center_lon REAL NOT NULL
             )");
 
-        // Road geometry table (detailed coordinates)
-        ExecuteNonQuery(connection, @"
-            CREATE TABLE road_geometry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                road_segment_id INTEGER NOT NULL,
-                sequence INTEGER NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                FOREIGN KEY (road_segment_id) REFERENCES road_segments(id)
-            )");
-
         // Spatial grid table
         ExecuteNonQuery(connection, @"
             CREATE TABLE spatial_grid (
@@ -131,14 +128,22 @@ public class DatabaseBuilder
                 FOREIGN KEY (road_segment_id) REFERENCES road_segments(id)
             )");
 
-        // Create indexes
-        ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_osm_id ON road_segments(osm_way_id)");
+        // Places table (cities, towns, suburbs, etc.)
+        ExecuteNonQuery(connection, @"
+            CREATE TABLE places (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                osm_node_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                place_type TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL
+            )");
+
+        // Create indexes (only those used by lookup queries)
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_bounds ON road_segments(min_lat, max_lat, min_lon, max_lon)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_center ON road_segments(center_lat, center_lon)");
-        ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_type ON road_segments(highway_type)");
-        ExecuteNonQuery(connection, "CREATE INDEX idx_road_geometry_segment ON road_geometry(road_segment_id, sequence)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_spatial_grid_cells ON spatial_grid(grid_x, grid_y)");
-        ExecuteNonQuery(connection, "CREATE INDEX idx_spatial_grid_segment ON spatial_grid(road_segment_id)");
+        ExecuteNonQuery(connection, "CREATE INDEX idx_places_type_coords ON places(place_type, latitude, longitude)");
     }
 
     /// <summary>
@@ -175,19 +180,6 @@ public class DatabaseBuilder
             center_lon = roadCmd.Parameters.Add("@center_lon", SqliteType.Real)
         };
 
-        using var geomCmd = connection.CreateCommand();
-        geomCmd.CommandText = @"
-            INSERT INTO road_geometry (road_segment_id, sequence, latitude, longitude)
-            VALUES (@road_segment_id, @sequence, @latitude, @longitude)";
-
-        var geomParams = new
-        {
-            road_segment_id = geomCmd.Parameters.Add("@road_segment_id", SqliteType.Integer),
-            sequence = geomCmd.Parameters.Add("@sequence", SqliteType.Integer),
-            latitude = geomCmd.Parameters.Add("@latitude", SqliteType.Real),
-            longitude = geomCmd.Parameters.Add("@longitude", SqliteType.Real)
-        };
-
         using var gridCmd = connection.CreateCommand();
         gridCmd.CommandText = @"
             INSERT OR IGNORE INTO spatial_grid (grid_x, grid_y, road_segment_id)
@@ -216,17 +208,6 @@ public class DatabaseBuilder
             roadParams.center_lon.Value = segment.Bounds.Center.Longitude;
 
             var roadSegmentId = Convert.ToInt64(roadCmd.ExecuteScalar());
-
-            // Insert geometry points
-            for (int i = 0; i < segment.Geometry.Count; i++)
-            {
-                var point = segment.Geometry[i];
-                geomParams.road_segment_id.Value = roadSegmentId;
-                geomParams.sequence.Value = i;
-                geomParams.latitude.Value = point.Latitude;
-                geomParams.longitude.Value = point.Longitude;
-                geomCmd.ExecuteNonQuery();
-            }
 
             // Calculate and insert spatial grid cells
             var gridCells = CalculateGridCells(segment.Bounds, worldBounds);
@@ -305,9 +286,43 @@ public class DatabaseBuilder
     }
 
     /// <summary>
+    /// Inserts place data (cities, towns, suburbs, etc.)
+    /// </summary>
+    private int InsertPlaceData(SqliteConnection connection, IReadOnlyList<PlaceNode> placeNodes)
+    {
+        var progress = new ConsoleProgressReporter("Inserting place data");
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO places (osm_node_id, name, place_type, latitude, longitude)
+            VALUES (@osm_node_id, @name, @place_type, @latitude, @longitude)";
+
+        var pOsmNodeId = cmd.Parameters.Add("@osm_node_id", SqliteType.Integer);
+        var pName = cmd.Parameters.Add("@name", SqliteType.Text);
+        var pPlaceType = cmd.Parameters.Add("@place_type", SqliteType.Text);
+        var pLatitude = cmd.Parameters.Add("@latitude", SqliteType.Real);
+        var pLongitude = cmd.Parameters.Add("@longitude", SqliteType.Real);
+
+        var count = 0;
+        foreach (var place in placeNodes)
+        {
+            pOsmNodeId.Value = place.OsmNodeId;
+            pName.Value = place.Name;
+            pPlaceType.Value = place.PlaceType;
+            pLatitude.Value = place.Latitude;
+            pLongitude.Value = place.Longitude;
+            cmd.ExecuteNonQuery();
+            count++;
+        }
+
+        progress.Complete($"{count:N0} places inserted");
+        return count;
+    }
+
+    /// <summary>
     /// Inserts metadata
     /// </summary>
-    private void InsertMetadata(SqliteConnection connection, Bounds worldBounds)
+    private void InsertMetadata(SqliteConnection connection, Bounds worldBounds, int placeCount = 0)
     {
         var metadata = new Dictionary<string, string>
         {
@@ -319,7 +334,8 @@ public class DatabaseBuilder
             ["max_latitude"] = worldBounds.MaxLatitude.ToString("F6"),
             ["min_longitude"] = worldBounds.MinLongitude.ToString("F6"),
             ["max_longitude"] = worldBounds.MaxLongitude.ToString("F6"),
-            ["osm_source"] = _countryConfig.GeofabrikUrl
+            ["osm_source"] = _countryConfig.GeofabrikUrl,
+            ["place_count"] = placeCount.ToString()
         };
 
         using var cmd = connection.CreateCommand();

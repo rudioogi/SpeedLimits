@@ -11,12 +11,16 @@ obj/
 *.userosscache
 *.sln.docstates
 
-# Data files
+# Data files (downloads and generated databases)
 data/
 *.osm.pbf
-*.db
+
+# Ignore temporary database files everywhere
 *.db-shm
 *.db-wal
+
+# Ignore large database files
+*.db
 
 # IDE
 .vs/

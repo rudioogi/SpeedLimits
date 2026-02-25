@@ -20,6 +20,13 @@ public class OsmRoadExtractor
         "secondary_link", "tertiary_link"
     };
 
+    private static readonly HashSet<string> PlaceTypes = new()
+    {
+        "city", "town", "suburb", "village", "hamlet", "neighbourhood"
+    };
+
+    public List<PlaceNode> PlaceNodes { get; private set; } = new();
+
     public OsmRoadExtractor(CountryConfig countryConfig)
     {
         _countryConfig = countryConfig;
@@ -53,17 +60,19 @@ public class OsmRoadExtractor
     }
 
     /// <summary>
-    /// Pass 1: Collects all nodes into a dictionary
+    /// Pass 1: Collects all node coordinates into a dictionary (stores only lat/lon, not full Node objects)
     /// </summary>
-    private Dictionary<long, Node> CollectNodes(string pbfFilePath)
+    private Dictionary<long, (double Lat, double Lon)> CollectNodes(string pbfFilePath)
     {
         var progress = new ConsoleProgressReporter("Pass 1: Collecting nodes");
-        var nodes = new Dictionary<long, Node>();
+        var nodes = new Dictionary<long, (double Lat, double Lon)>();
         long nodeCount = 0;
         var lastReportTime = DateTime.UtcNow;
 
         using var fileStream = File.OpenRead(pbfFilePath);
         var source = new PBFOsmStreamSource(fileStream);
+
+        var placeNodes = new List<PlaceNode>();
 
         foreach (var element in source)
         {
@@ -72,8 +81,24 @@ public class OsmRoadExtractor
                 var node = (Node)element;
                 if (node.Id.HasValue && node.Latitude.HasValue && node.Longitude.HasValue)
                 {
-                    nodes[node.Id.Value] = node;
+                    nodes[node.Id.Value] = (node.Latitude.Value, node.Longitude.Value);
                     nodeCount++;
+
+                    // Check for place nodes (city, town, suburb, etc.)
+                    if (node.Tags != null
+                        && node.Tags.TryGetValue("place", out var placeType)
+                        && PlaceTypes.Contains(placeType)
+                        && node.Tags.TryGetValue("name", out var placeName))
+                    {
+                        placeNodes.Add(new PlaceNode
+                        {
+                            OsmNodeId = node.Id.Value,
+                            Name = placeName,
+                            PlaceType = placeType,
+                            Latitude = node.Latitude.Value,
+                            Longitude = node.Longitude.Value
+                        });
+                    }
 
                     // Report progress every second
                     if ((DateTime.UtcNow - lastReportTime).TotalSeconds > 1)
@@ -85,14 +110,15 @@ public class OsmRoadExtractor
             }
         }
 
-        progress.Complete($"{nodeCount:N0} nodes collected");
+        PlaceNodes = placeNodes;
+        progress.Complete($"{nodeCount:N0} nodes collected, {placeNodes.Count:N0} place nodes found");
         return nodes;
     }
 
     /// <summary>
     /// Pass 2: Processes ways and builds road segments
     /// </summary>
-    private IEnumerable<RoadSegment> ProcessWays(string pbfFilePath, Dictionary<long, Node> nodes)
+    private IEnumerable<RoadSegment> ProcessWays(string pbfFilePath, Dictionary<long, (double Lat, double Lon)> nodes)
     {
         using var fileStream = File.OpenRead(pbfFilePath);
         var source = new PBFOsmStreamSource(fileStream);
@@ -206,7 +232,7 @@ public class OsmRoadExtractor
     /// <summary>
     /// Builds geometry list from way nodes
     /// </summary>
-    private List<GeoPoint> BuildGeometry(Way way, Dictionary<long, Node> nodes)
+    private List<GeoPoint> BuildGeometry(Way way, Dictionary<long, (double Lat, double Lon)> nodes)
     {
         var geometry = new List<GeoPoint>();
 
@@ -215,11 +241,9 @@ public class OsmRoadExtractor
 
         foreach (var nodeId in way.Nodes)
         {
-            if (nodes.TryGetValue(nodeId, out var node) &&
-                node.Latitude.HasValue &&
-                node.Longitude.HasValue)
+            if (nodes.TryGetValue(nodeId, out var coords))
             {
-                geometry.Add(new GeoPoint(node.Latitude.Value, node.Longitude.Value));
+                geometry.Add(new GeoPoint(coords.Lat, coords.Lon));
             }
         }
 

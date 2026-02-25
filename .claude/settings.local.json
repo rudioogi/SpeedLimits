@@ -5,7 +5,10 @@
       "Bash(findstr:*)",
       "Bash(dotnet restore:*)",
       "Bash(dotnet nuget list:*)",
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "Bash(./OsmDataAcquisition.exe)",
+      "Bash(timeout 3 dotnet run:*)",
+      "Bash(cd C:\\\\Dev\\\\SandBox\\\\SpeedLimits:*)"
     ]
   }
 }

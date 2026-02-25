@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using OsmDataAcquisition.Models;
+using OsmDataAcquisition.Services;
 
 namespace OsmDataAcquisition.Utilities;
 
@@ -30,13 +31,26 @@ public class ValidationHelper
         var explicitCount = GetScalar<long>(connection, "SELECT COUNT(*) FROM road_segments WHERE is_inferred = 0");
         var inferredCount = GetScalar<long>(connection, "SELECT COUNT(*) FROM road_segments WHERE is_inferred = 1");
         var gridCells = GetScalar<long>(connection, "SELECT COUNT(DISTINCT grid_x || '_' || grid_y) FROM spatial_grid");
-        var geometryPoints = GetScalar<long>(connection, "SELECT COUNT(*) FROM road_geometry");
 
         Console.WriteLine($"Total road segments: {totalRoads:N0}");
         Console.WriteLine($"  Explicit speed limits: {explicitCount:N0} ({(explicitCount * 100.0 / totalRoads):F1}%)");
         Console.WriteLine($"  Inferred speed limits: {inferredCount:N0} ({(inferredCount * 100.0 / totalRoads):F1}%)");
         Console.WriteLine($"Grid cells populated: {gridCells:N0}");
-        Console.WriteLine($"Total geometry points: {geometryPoints:N0}");
+
+        // Place counts (backward compatible with old databases)
+        try
+        {
+            var placeCount = GetScalar<long>(connection, "SELECT COUNT(*) FROM places");
+            Console.WriteLine($"Total place nodes: {placeCount:N0}");
+            if (placeCount > 0)
+            {
+                var cities = GetScalar<long>(connection, "SELECT COUNT(*) FROM places WHERE place_type IN ('city', 'town')");
+                var suburbs = GetScalar<long>(connection, "SELECT COUNT(*) FROM places WHERE place_type IN ('suburb', 'neighbourhood', 'village', 'hamlet')");
+                Console.WriteLine($"  Cities/Towns: {cities:N0}");
+                Console.WriteLine($"  Suburbs/Villages: {suburbs:N0}");
+            }
+        }
+        catch (SqliteException) { /* places table doesn't exist in old databases */ }
 
         // Speed limit distribution
         Console.WriteLine("\nSpeed limit distribution:");

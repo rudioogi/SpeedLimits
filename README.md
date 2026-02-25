@@ -1,333 +1,255 @@
-# OSM Speed Limit Data Acquisition
+# OSM Speed Limit & Reverse Geocoding System
 
-A .NET 8.0 console application that downloads OpenStreetMap data for South Africa and Australia, extracts road segments with speed limits (explicit or inferred), and stores them in optimized SQLite databases for IoT device usage.
+A .NET 8.0 application that builds offline, GPS-based lookup databases from OpenStreetMap data. Given any GPS coordinate, it can return the **speed limit**, **street name**, **suburb**, and **city/town** — entirely offline, with sub-5ms query times. Designed for IoT devices, dashcams, and fleet tracking.
 
-## NuGet Packages
+## How It Works — The Big Picture
 
-- **OsmSharp 6.2.0** - OSM data parsing
-- **Microsoft.Data.Sqlite 8.0.0** - SQLite database
-- **Microsoft.Extensions.Configuration 8.0.0** - Configuration management
+### The Data Source: OpenStreetMap
+
+All data comes from [OpenStreetMap](https://www.openstreetmap.org/) (OSM), a community-maintained map of the entire world. OSM stores geographic data as three types of elements:
+
+- **Nodes** — individual points on the map with a latitude/longitude. Every intersection, traffic light, and place label is a node. Critically, OSM tags nodes with metadata like `place=city` + `name=Cape Town`, which is how we know where cities and suburbs are located.
+- **Ways** — ordered sequences of nodes that form lines or shapes. Every road is a way, tagged with metadata like `highway=residential`, `maxspeed=60`, and `name=Main Road`.
+- **Relations** — groups of ways/nodes that form complex structures (boundaries, routes). Not used by this system.
+
+[Geofabrik](https://download.geofabrik.de/) provides regularly updated country-level extracts of OSM data in `.osm.pbf` format (a compressed binary format). The South Africa extract is ~245 MB; Australia is ~1.5 GB.
+
+### What Gets Extracted
+
+The application reads each PBF file in a **two-pass scan**:
+
+**Pass 1 — Collect all nodes:**
+Every node in the file is read and its coordinates are stored in a dictionary (node ID to lat/lon). During this same pass, the system also identifies **place nodes** — nodes tagged with `place=city`, `place=town`, `place=suburb`, `place=village`, `place=hamlet`, or `place=neighbourhood` — and collects them separately. These are the named geographic areas that enable reverse geocoding.
+
+**Pass 2 — Process roads:**
+Every way tagged as a routable road (`highway=motorway`, `highway=residential`, etc.) is processed. The system looks up the coordinates of each node in the way to reconstruct the road's geometry, extracts the speed limit (from the `maxspeed` tag, or infers it from the road type), and calculates the road's bounding box and center point.
+
+### What Gets Stored
+
+Everything is packed into a single SQLite database per country:
+
+| Table | What it stores | Used for |
+|-------|---------------|----------|
+| `road_segments` | Every road's name, type, speed limit, and center coordinates | Speed limit lookup + street name lookup |
+| `spatial_grid` | A grid index mapping geographic cells to road IDs | Fast spatial queries (which roads are near point X?) |
+| `places` | Every city, town, suburb, village, hamlet, and neighbourhood node | Reverse geocoding (suburb + city lookup) |
+| `metadata` | Country info, bounds, creation date, statistics | Validation and diagnostics |
+
+### How Lookups Work
+
+All lookups follow the same fundamental principle: **bounding-box query + distance ordering**.
+
+#### Speed Limit Lookup
+Given GPS coordinates `(lat, lon)`:
+1. Calculate which grid cell the point falls in
+2. Query `spatial_grid` for road segment IDs in that cell (and adjacent cells)
+3. Filter `road_segments` where the point falls within the road's bounding box
+4. Order by squared distance from the road's center point to the query point
+5. Return the speed limit of the nearest road
+
+This takes **<1ms** because the grid index narrows millions of roads down to a handful of candidates.
+
+#### Reverse Geocoding (Street / Suburb / City)
+Given GPS coordinates `(lat, lon)`, three independent queries run:
+
+1. **Street** — Find the nearest **named road** in `road_segments` within ~550m. This uses the existing road data; no extra table needed.
+2. **Suburb** — Find the nearest **suburb/neighbourhood/village/hamlet node** in `places` within ~5.5km. OSM place nodes are point markers at the center of named areas.
+3. **City** — Find the nearest **city/town node** in `places` within ~33km.
+
+Each query uses a bounding-box filter on latitude/longitude (which the index accelerates), then orders by distance. Total time: **~1-5ms** for all three.
+
+#### Why "Nearest Point" Works
+OSM place nodes are positioned at the recognized center of each area. A suburb node for "Gardens" sits roughly in the middle of the Gardens suburb. By finding the nearest suburb node to your GPS position, you get the suburb you're most likely in. This is simpler than polygon-based containment testing and works well for most use cases, though edge cases near suburb boundaries may return an adjacent area.
 
 ## Features
 
-- **Automated Download**: Downloads OSM PBF files from Geofabrik with retry logic
-- **Two-Pass Parsing**: Memory-efficient extraction of road segments from large OSM datasets
-- **Speed Limit Inference**: Extracts explicit speed limits or infers from highway types
-- **Spatial Grid Indexing**: 1000×1000 grid for fast location-based queries
-- **Optimized SQLite**: Performance-tuned databases with WAL mode and spatial indexes
-- **Validation**: Built-in validation and statistics reporting
+- **Offline operation** — no internet needed after database is built
+- **Speed limit lookup** — explicit from OSM tags or inferred from road type
+- **Reverse geocoding** — coordinates to street name, suburb, and city
+- **Sub-millisecond queries** — spatial grid indexing for IoT-grade performance
+- **Two-country support** — South Africa and Australia (easily extensible)
+- **IoT-ready API** — standalone `speedlimit_lookup.cs` with prepared statements
 
 ## Requirements
 
 - **.NET 8.0 SDK** or later
-- **16GB RAM** (recommended for processing Australia dataset)
+- **16GB RAM** recommended (for processing Australia)
 - **5GB free disk space** (for downloads and databases)
-- **Internet connection** (for downloading OSM data)
+- **Internet connection** (only for downloading OSM data)
 
-## Installation
-
-1. Clone or download this repository
-2. Restore NuGet packages:
-   ```bash
-   dotnet restore
-   ```
-
-3. Build the project:
-   ```bash
-   dotnet build -c Release
-   ```
-
-## Configuration
-
-Edit `appsettings.json` to customize:
-
-- **Countries**: Add or remove countries to process
-- **GeofabrikUrl**: OSM data source URLs
-- **DefaultSpeedLimits**: Country-specific speed limits by highway type
-- **GridSize**: Spatial grid resolution (default: 1000×1000)
-- **Database settings**: Cache size, memory mapping, etc.
-
-## Usage
-
-### Run the Application
+## Quick Start
 
 ```bash
+dotnet restore
+dotnet build -c Release
 dotnet run -c Release
 ```
 
-Or run the compiled executable:
-
-```bash
-cd bin/Release/net8.0
-./OsmDataAcquisition.exe
-```
-
-### Expected Output
+## Menu Options
 
 ```
-=== OSM Speed Limit Data Acquisition ===
-
-============================================================
-Processing South Africa (ZA)
-============================================================
-
-Step 1: Downloading OSM data
-Source: https://download.geofabrik.de/africa/south-africa-latest.osm.pbf
-
-Downloading: 100% (245.3 MB / 245.3 MB)
-Downloaded file size: 245.3 MB
-
-Step 2: Extracting road segments
-
-Starting two-pass OSM extraction...
-Pass 1: Collecting nodes: 12,345,678
-Pass 1 complete: Collected 12,345,678 nodes
-Pass 2: Processing ways...
-Extracted 85,423 road segments...
-Pass 2 complete: Extracted 85,423 road segments
-
-Step 3: Building SQLite database
-
-Building SQLite database...
-Creating database schema...
-Inserting road data: 85,423
-Transaction committed successfully
-Optimizing database (this may take a few minutes)...
-Analysis complete
-Vacuum complete
-Database size: 87.5 MB
-
-Step 4: Validating database
-
-=== Database Validation ===
-Total road segments: 85,423
-  Explicit speed limits: 12,567 (14.7%)
-  Inferred speed limits: 72,856 (85.3%)
-Grid cells populated: 4,521
-Total geometry points: 1,234,567
-
-Speed limit distribution:
-   40 km/h:    2,134 roads
-   60 km/h:   45,678 roads
-   80 km/h:   18,234 roads
-  100 km/h:   12,456 roads
-  120 km/h:    6,921 roads
-
-Highway type distribution:
-  residential         :   45,678 roads
-  tertiary            :   18,234 roads
-  secondary           :   12,456 roads
-  primary             :    6,921 roads
-  trunk               :    1,234 roads
-
-=== Validation Complete ===
-
-✓ South Africa processing complete!
-
-Total processing time: 8.5 minutes
+1. Download and Process OSM Data    — Downloads PBF + builds database
+2. Validate Pre-Built Databases     — Checks database integrity and stats
+3. Test Location Lookup             — Speed limit lookup by coordinates
+4. View Database Statistics         — Road/place counts, distributions
+5. Test Known Locations             — Predefined test coordinates
+6. Reverse Geocode                  — Coordinates to street/suburb/city
+7. Exit
 ```
 
-## Output Files
+### Coordinate Input Format
 
-The application creates the following files:
+Options 3 and 6 accept coordinates as a single comma-separated value, which you can paste directly from Google Maps:
 
-- `data/downloads/za-latest.osm.pbf` - Downloaded OSM data (South Africa)
-- `data/downloads/au-latest.osm.pbf` - Downloaded OSM data (Australia)
-- `data/za_speedlimits.db` - South Africa speed limit database
-- `data/au_speedlimits.db` - Australia speed limit database
+```
+Enter coordinates as lat,lon (e.g. -33.9249,18.4241): -29.621687,30.400331
+```
+
+### Example Reverse Geocode Output
+
+```
+Results:
+─────────────────────────────────────────────────────────────
+  Street:  Main Road [primary] (120m away)
+  Suburb:  Gardens [suburb] (450m away)
+  City:    Cape Town [city] (2,300m away)
+─────────────────────────────────────────────────────────────
+```
+
+## Configuration
+
+Edit `appsettings.json`:
+
+```json
+{
+  "DataAcquisition": {
+    "Countries": [
+      {
+        "Code": "ZA",
+        "Name": "South Africa",
+        "GeofabrikUrl": "https://download.geofabrik.de/africa/south-africa-latest.osm.pbf",
+        "DefaultSpeedLimits": {
+          "motorway": 120, "trunk": 120, "primary": 100,
+          "secondary": 80, "tertiary": 80, "residential": 60
+        }
+      }
+    ],
+    "DownloadDirectory": "data/downloads",
+    "DatabaseDirectory": "data"
+  }
+}
+```
+
+### Adding a New Country
+
+Add an entry to the `Countries` array with the Geofabrik URL and default speed limits for that country's road types. Run option 1 to download and build.
 
 ## Database Schema
 
-### Tables
-
-#### `metadata`
-Stores country information and processing metadata.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| key | TEXT | Metadata key |
-| value | TEXT | Metadata value |
-
-#### `road_segments`
-Stores road segment information with bounding boxes.
+### `road_segments`
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER | Primary key |
-| osm_way_id | INTEGER | OSM way ID |
-| name | TEXT | Road name (nullable) |
-| highway_type | TEXT | Highway classification |
+| osm_way_id | INTEGER | OSM way identifier |
+| name | TEXT | Road name (null if unnamed) |
+| highway_type | TEXT | Road classification (motorway, residential, etc.) |
 | speed_limit_kmh | INTEGER | Speed limit in km/h |
-| is_inferred | INTEGER | 1 if inferred, 0 if explicit |
-| min_lat | REAL | Minimum latitude |
-| max_lat | REAL | Maximum latitude |
-| min_lon | REAL | Minimum longitude |
-| max_lon | REAL | Maximum longitude |
-| center_lat | REAL | Center latitude |
-| center_lon | REAL | Center longitude |
+| is_inferred | INTEGER | 0 = from OSM `maxspeed` tag, 1 = inferred from road type |
+| center_lat, center_lon | REAL | Center point of the road segment |
+| min_lat, max_lat, min_lon, max_lon | REAL | Bounding box |
 
-#### `road_geometry`
-Stores detailed road coordinates.
+### `places`
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER | Primary key |
-| road_segment_id | INTEGER | Foreign key to road_segments |
-| sequence | INTEGER | Point order in geometry |
-| latitude | REAL | Point latitude |
-| longitude | REAL | Point longitude |
+| osm_node_id | INTEGER | OSM node identifier |
+| name | TEXT | Place name (e.g. "Gardens", "Cape Town") |
+| place_type | TEXT | One of: city, town, suburb, village, hamlet, neighbourhood |
+| latitude, longitude | REAL | Coordinates of the place node |
 
-#### `spatial_grid`
-Spatial grid index for fast location queries.
+### `spatial_grid`
 
 | Column | Type | Description |
 |--------|------|-------------|
-| grid_x | INTEGER | Grid X coordinate (0-999) |
-| grid_y | INTEGER | Grid Y coordinate (0-999) |
+| grid_x, grid_y | INTEGER | Grid cell coordinates |
 | road_segment_id | INTEGER | Foreign key to road_segments |
 
-## Querying the Database
+### `metadata`
 
-### Example: Find Roads Near a Location
+Key-value pairs: `country_code`, `country_name`, `created_date`, `grid_size`, bounds, `osm_source`, `place_count`.
 
-```sql
--- Find roads near Cape Town (lat: -33.9249, lon: 18.4241)
-SELECT rs.name, rs.highway_type, rs.speed_limit_kmh, rs.is_inferred
-FROM road_segments rs
-WHERE rs.center_lat BETWEEN -33.9349 AND -33.9149
-  AND rs.center_lon BETWEEN 18.4141 AND 18.4341
-ORDER BY (rs.center_lat - (-33.9249)) * (rs.center_lat - (-33.9249)) +
-         (rs.center_lon - 18.4241) * (rs.center_lon - 18.4241)
-LIMIT 10;
+## IoT Integration
+
+The standalone `speedlimit_lookup.cs` is designed to be dropped into any .NET IoT project:
+
+```csharp
+using var lookup = new SpeedLimitLookup("za_speedlimits.db");
+
+// Speed limit lookup (<1ms)
+int speed = lookup.GetSpeedLimit(-33.9249, 18.4241);
+
+// Detailed road info
+RoadInfo? road = lookup.GetRoadInfo(-33.9249, 18.4241);
+
+// Reverse geocode — street, suburb, city (~1-5ms)
+LocationInfo? location = lookup.GetLocationInfo(-33.9249, 18.4241);
+if (location != null)
+    Console.WriteLine(location); // "Main Road, Gardens, Cape Town"
 ```
 
-### Example: Using Spatial Grid
+The `GetLocationInfo()` method is backward compatible — it returns `null` on databases that don't have the `places` table.
 
-```sql
--- Step 1: Calculate grid cell for location
--- For a location at (lat, lon), calculate:
---   grid_x = floor((lon - min_lon) / (max_lon - min_lon) * 1000)
---   grid_y = floor((lat - min_lat) / (max_lat - min_lat) * 1000)
+## Speed Limit Inference
 
--- Step 2: Query using grid
-SELECT DISTINCT rs.*
-FROM spatial_grid sg
-JOIN road_segments rs ON sg.road_segment_id = rs.id
-WHERE sg.grid_x BETWEEN 450 AND 452
-  AND sg.grid_y BETWEEN 320 AND 322;
+When roads don't have an explicit `maxspeed` tag in OSM, the speed limit is inferred from the road type using country-specific defaults:
+
+| Road Type | South Africa | Australia |
+|-----------|-------------|-----------|
+| motorway / trunk | 120 km/h | 110 km/h |
+| primary | 100 km/h | 100 km/h |
+| secondary / tertiary | 80 km/h | 80 km/h |
+| residential | 60 km/h | 50 km/h |
+| living_street / service | 40 km/h | 40 km/h |
+
+Special values: `"none"` = national limit, `"walk"` = 5 km/h, mph values are auto-converted.
+
+## File Structure
+
+```
+SpeedLimits/
+  Program.cs                      — Console app with menu system
+  appsettings.json                — Country configs and DB settings
+  speedlimit_lookup.cs            — Standalone IoT lookup API
+  Models/
+    PlaceNode.cs                  — Place node model (city, suburb, etc.)
+    RoadSegment.cs                — Road segment model
+    GeoPoint.cs                   — Lat/lon coordinate with distance calc
+  Services/
+    OsmDataDownloader.cs          — PBF file downloader with retry
+    OsmRoadExtractor.cs           — Two-pass PBF extraction (roads + places)
+    DatabaseBuilder.cs            — SQLite database builder
+    ReverseGeocoder.cs            — Reverse geocoding service
+  Utilities/
+    ValidationHelper.cs           — Database validation and reporting
+    ConsoleProgressReporter.cs    — Console progress display
+  Database/                       — Pre-built databases (not in git)
+  data/downloads/                 — Downloaded PBF files (not in git)
 ```
 
-## Speed Limit Inference Logic
+## Limitations
 
-When explicit `maxspeed` tags are not present, speed limits are inferred based on highway type:
+- **Suburb accuracy** — Suburbs are identified by nearest OSM place node, not polygon boundaries. Results near suburb edges may return an adjacent area.
+- **Inferred speed limits** — ~70-93% of speed limits are inferred from road type (depending on country). These are reasonable defaults but may not reflect actual posted limits.
+- **Databases must be rebuilt** after code updates that change the schema. Old databases without the `places` table will still work for speed lookups but reverse geocoding will return "(not found)".
 
-### South Africa (ZA)
-- **motorway / trunk**: 120 km/h
-- **primary**: 100 km/h
-- **secondary / tertiary**: 80 km/h
-- **residential / unclassified**: 60 km/h
-- **living_street / service**: 40 km/h
+## Data Attribution
 
-### Australia (AU)
-- **motorway / trunk**: 110 km/h
-- **primary**: 100 km/h
-- **secondary / tertiary**: 80 km/h
-- **unclassified**: 60 km/h
-- **residential**: 50 km/h
-- **living_street / service**: 40 km/h
+OSM data is copyright [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), licensed under ODbL. Country extracts provided by [Geofabrik](https://download.geofabrik.de/).
 
-### Special Cases
-- **"none"**: Treated as national speed limit (120 ZA / 110 AU)
-- **"walk"**: 5 km/h
-- **mph values**: Automatically converted to km/h
+## NuGet Packages
 
-## Performance Characteristics
-
-### South Africa
-- **Download**: ~245 MB
-- **Processing time**: 8-12 minutes
-- **Database size**: 50-100 MB
-- **Road segments**: ~85,000
-- **Memory usage**: 2-3 GB RAM
-
-### Australia
-- **Download**: ~1.5-2 GB
-- **Processing time**: 45-75 minutes
-- **Database size**: 300-500 MB
-- **Road segments**: ~500,000+
-- **Memory usage**: 3-4 GB RAM
-
-## Troubleshooting
-
-### Out of Memory Errors
-
-**Symptom**: Application crashes with `OutOfMemoryException` during Pass 1.
-
-**Solution**:
-- Ensure you're running the 64-bit version (`PlatformTarget: x64` in .csproj)
-- Close other memory-intensive applications
-- Increase system virtual memory (page file)
-- Minimum 16GB RAM recommended for Australia
-
-### Download Failures
-
-**Symptom**: HTTP errors or incomplete downloads.
-
-**Solution**:
-- Check internet connection
-- Verify Geofabrik URL is accessible: https://download.geofabrik.de/
-- Increase `RetryAttempts` in `appsettings.json`
-- Manually download PBF file to `data/downloads/` directory
-
-### Slow Database Creation
-
-**Symptom**: Database creation takes very long.
-
-**Solution**:
-- This is normal for large datasets (Australia can take 30-45 minutes)
-- Ensure SSD storage for better performance
-- Do not interrupt the process during transaction commit
-
-### No Roads Extracted
-
-**Symptom**: Validation shows 0 road segments.
-
-**Solution**:
-- Verify PBF file is not corrupted (check file size)
-- Ensure OsmSharp package is correctly installed
-- Check for errors in console output during extraction
-
-## Architecture
-
-### Two-Pass Algorithm
-
-The application uses a memory-efficient two-pass approach:
-
-1. **Pass 1**: Reads entire PBF file and collects all nodes into a dictionary (node ID → coordinates)
-2. **Pass 2**: Reads PBF file again, processes ways, and builds road segments using node dictionary
-
-This approach trades speed for memory efficiency, avoiding the need to stream and filter nodes dynamically.
-
-### Spatial Grid Indexing
-
-The 1000×1000 grid provides efficient location-based queries:
-
-- **Cell Size**: ~1.4km × 1.5km (varies by latitude)
-- **Query Strategy**: Calculate grid cell from (lat, lon) → lookup road segments → filter by distance
-- **Trade-off**: Small overhead in database size for significant query performance gains
-
-## License
-
-This project is provided as-is for data acquisition and processing purposes.
-
-OSM data is © OpenStreetMap contributors, licensed under ODbL: https://www.openstreetmap.org/copyright
-
-## Support
-
-For issues, questions, or contributions, please refer to the project documentation or contact the maintainer.
-
-## Acknowledgments
-
-- **OpenStreetMap**: For comprehensive global mapping data
-- **Geofabrik**: For providing regularly updated OSM extracts
-- **OsmSharp**: For excellent OSM data parsing library
+- **OsmSharp 6.2.0** — OSM PBF parsing
+- **Microsoft.Data.Sqlite 8.0.0** — SQLite database
+- **Microsoft.Extensions.Configuration 8.0.0** — Configuration management

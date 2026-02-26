@@ -11,6 +11,7 @@ class Program
 {
     private static DataAcquisitionConfig? _dataConfig;
     private static DatabaseConfig? _dbConfig;
+    private static string _configuredDatabaseDir = "Database";
 
     static async Task<int> Main(string[] args)
     {
@@ -86,35 +87,55 @@ class Program
         _dbConfig = configuration.GetSection("Database").Get<DatabaseConfig>()
             ?? throw new Exception("Failed to load Database configuration");
 
-        // Ensure directories exist
-        Directory.CreateDirectory(_dataConfig.DatabaseDirectory);
+        _configuredDatabaseDir = configuration["DatabaseDirectory"] ?? "Database";
+
+        // Ensure working directories exist
+        Directory.CreateDirectory(_dataConfig.DownloadDirectory);
         Directory.CreateDirectory(GetDatabaseFolder());
     }
 
     /// <summary>
-    /// Gets the absolute path to the Database folder (works from bin or project root)
+    /// Resolves the database folder from the configured path.
+    /// Supports absolute paths and relative paths (checked against CWD, exe dir,
+    /// and up to 5 parent directories so the app works from any launch location).
     /// </summary>
     static string GetDatabaseFolder()
     {
-        // Try current directory first (when running from project root)
-        var currentDir = Path.Combine(Directory.GetCurrentDirectory(), "Database");
-        if (Directory.Exists(currentDir))
-            return currentDir;
+        var path = _configuredDatabaseDir;
 
-        // Try relative to executable (when running from bin folder)
-        var exeDir = AppContext.BaseDirectory;
-        var relativeToExe = Path.Combine(exeDir, "Database");
-        if (Directory.Exists(relativeToExe))
-            return relativeToExe;
+        // Absolute path — use directly
+        if (Path.IsPathRooted(path))
+        {
+            Directory.CreateDirectory(path);
+            return path;
+        }
 
-        // Try going up from bin folder to project root
-        var projectRoot = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "Database"));
-        if (Directory.Exists(projectRoot))
-            return projectRoot;
+        // Relative to current working directory (dotnet run from project root)
+        var cwdBased = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path));
+        if (Directory.Exists(cwdBased))
+            return cwdBased;
 
-        // If none exist, create in current directory
-        Directory.CreateDirectory(currentDir);
-        return currentDir;
+        // Relative to executable directory
+        var exeBased = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
+        if (Directory.Exists(exeBased))
+            return exeBased;
+
+        // Walk up from executable (handles bin/Debug/net8.0/ nesting)
+        var folderName = Path.GetFileName(path.TrimEnd('/', '\\'));
+        if (string.IsNullOrEmpty(folderName)) folderName = path;
+
+        for (int levels = 1; levels <= 5; levels++)
+        {
+            var parts = Enumerable.Repeat("..", levels).Append(folderName).ToArray();
+            var candidate = Path.GetFullPath(
+                Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray()));
+            if (Directory.Exists(candidate))
+                return candidate;
+        }
+
+        // Fallback: create at CWD-relative path
+        Directory.CreateDirectory(cwdBased);
+        return cwdBased;
     }
 
     /// <summary>
@@ -612,9 +633,7 @@ class Program
         Console.WriteLine("Step 3: Building SQLite database");
         Console.WriteLine();
 
-        var databasePath = Path.Combine(
-            dataConfig.DatabaseDirectory,
-            $"{country.Code.ToLower()}_speedlimits.db");
+        var databasePath = GetDatabasePath($"{country.Code.ToLower()}_speedlimits.db");
 
         var builder = new DatabaseBuilder(dbConfig, country);
         builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);
@@ -632,7 +651,7 @@ class Program
         var duration = DateTime.UtcNow - startTime;
         Console.WriteLine($"Total processing time: {duration.TotalMinutes:F1} minutes");
 
-        Console.WriteLine($"\n💡 Tip: Copy {databasePath} to Database/ folder for use with lookup tools");
+        Console.WriteLine($"\n✓ Database written to: {databasePath}");
     }
 
     /// <summary>

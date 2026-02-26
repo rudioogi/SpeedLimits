@@ -2,8 +2,9 @@ namespace SpeedLimits.Api.Services;
 
 /// <summary>
 /// Resolves the path to the Database folder containing .db files.
-/// Searches relative to the working directory (dotnet run) and the executable
-/// so the API works whether launched from the project directory or the bin folder.
+/// Reads the configured value from "DatabaseDirectory" in appsettings.json.
+/// Supports absolute paths and relative paths (resolved against CWD, exe directory,
+/// and up to 5 parent directories so the API works from any launch location).
 /// </summary>
 public class DatabasePathResolver
 {
@@ -11,17 +12,20 @@ public class DatabasePathResolver
 
     public DatabasePathResolver(IConfiguration configuration)
     {
-        var configured = configuration["Api:DatabaseDirectory"] ?? "../Database";
+        var configured = configuration["DatabaseDirectory"] ?? "Database";
         _databaseFolder = Resolve(configured);
     }
 
     private static string Resolve(string path)
     {
-        // Absolute path provided and exists
-        if (Path.IsPathRooted(path) && Directory.Exists(path))
+        // Absolute path — use directly (create if needed)
+        if (Path.IsPathRooted(path))
+        {
+            Directory.CreateDirectory(path);
             return path;
+        }
 
-        // Relative to current working directory (e.g. dotnet run from SpeedLimits.Api/)
+        // Relative to current working directory (e.g. dotnet run from solution root)
         var cwdBased = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), path));
         if (Directory.Exists(cwdBased))
             return cwdBased;
@@ -31,17 +35,25 @@ public class DatabasePathResolver
         if (Directory.Exists(exeBased))
             return exeBased;
 
-        // Walk up from the executable (handles bin/Debug/net8.0/ nesting)
-        // Level 3 = project root of API, Level 4 = solution root (console project root)
+        // Walk up from the executable (handles bin/Debug/net8.0/ nesting).
+        // Use the last path component of the configured value so that
+        // e.g. "Database" or "data/db" both work correctly.
+        var folderName = Path.GetFileName(path.TrimEnd('/', '\\'));
+        if (string.IsNullOrEmpty(folderName))
+            folderName = path;
+
         for (var levels = 1; levels <= 5; levels++)
         {
-            var parts = Enumerable.Repeat("..", levels).Append("Database").ToArray();
-            var candidate = Path.GetFullPath(Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray()));
+            var parts = Enumerable.Repeat("..", levels).Append(folderName).ToArray();
+            var candidate = Path.GetFullPath(
+                Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray()));
             if (Directory.Exists(candidate))
                 return candidate;
         }
 
-        return cwdBased; // fallback — may not exist yet
+        // Fallback: create at CWD-relative path
+        Directory.CreateDirectory(cwdBased);
+        return cwdBased;
     }
 
     /// <summary>Returns the resolved absolute path to the Database folder.</summary>

@@ -120,9 +120,8 @@ public class DataAcquisitionController : ControllerBase
                 throw new Exception("No road segments extracted — possible parsing error.");
 
             // Step 3: Build database
-            var databasePath = System.IO.Path.Combine(
-                _dataConfig.DatabaseDirectory,
-                $"{country.Code.ToLower()}_speedlimits.db");
+            System.IO.Directory.CreateDirectory(_pathResolver.DatabaseFolder);
+            var databasePath = _pathResolver.GetPath($"{country.Code.ToLower()}_speedlimits.db");
 
             var builder = new DatabaseBuilder(_dbConfig, country);
             builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);

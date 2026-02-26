@@ -14,7 +14,15 @@
       "Bash(rm:*)",
       "Bash(dotnet sln:*)",
       "Bash(dotnet:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebSearch",
+      "mcp__context7__resolve-library-id",
+      "WebFetch(domain:www.npgsql.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:olawalelawal.dev)",
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:postgis.net)",
+      "Bash(python3:*)"
     ]
   }
 }

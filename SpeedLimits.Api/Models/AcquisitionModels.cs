@@ -23,6 +23,7 @@ public class CountryProcessResult
     public string? Error { get; init; }
     public long RoadSegmentsExtracted { get; init; }
     public long PlaceNodesExtracted { get; init; }
+    public long AddressNodesExtracted { get; init; }
     public double DatabaseSizeMb { get; init; }
     public double ProcessingTimeMinutes { get; init; }
 }

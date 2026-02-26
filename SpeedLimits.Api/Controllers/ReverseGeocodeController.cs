@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using SpeedLimits.Core;
 using SpeedLimits.Core.Services;
@@ -106,13 +107,172 @@ public class ReverseGeocodeController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Validates reverse geocode results against expected trip location data.
+    /// Accepts an Elasticsearch-style hits array; compares startLocationAddress
+    /// (road, place, region) against our geocoder output.
+    /// isMatch = road matched AND city matched.
+    /// </summary>
+    [HttpPost("validate")]
+    [ProducesResponseType(typeof(TripValidationResponse), 200)]
+    [ProducesResponseType(400)]
+    [ProducesResponseType(404)]
+    public IActionResult Validate([FromBody] TripValidationRequest request)
+    {
+        if (request.Hits == null || request.Hits.Count == 0)
+            return BadRequest(new { error = "Hits list must contain at least one item." });
+
+        var dbPath = _pathResolver.GetCountryDbPath(request.CountryCode);
+        if (dbPath == null)
+            return NotFound(new { error = $"Database for country '{request.CountryCode}' not found." });
+
+        using var speedLookup = new SpeedLimitLookup(dbPath);
+        // Share one geocoder instance across all items in the batch for efficiency.
+        using var geocoder = new ReverseGeocoder(dbPath);
+        var batchTimer = Stopwatch.StartNew();
+        var results = new List<TripValidationResultItem>(request.Hits.Count);
+        int matchCount = 0;
+
+        foreach (var hit in request.Hits)
+        {
+            var src = hit.Source;
+            var addr = src?.StartLocationAddress;
+            var tripId = hit.Id ?? src?.Id ?? "(unknown)";
+
+            // Skip hits where source or coordinates are missing
+            if (src == null || addr == null)
+            {
+                results.Add(new TripValidationResultItem
+                {
+                    TripId = tripId,
+                    TripStartTimestamp = src?.TripStartTimestamp,
+                    TripEndTimestamp = src?.TripEndTimestamp,
+                    StartLocationAddress = new TripValidationAddress(),
+                    ActualRoad = "[missing source or startLocationAddress]",
+                    IsMatch = false
+                });
+                continue;
+            }
+
+            if (!ValidateCoordinates(addr.Latitude, addr.Longitude, out var coordError))
+            {
+                results.Add(new TripValidationResultItem
+                {
+                    TripId = tripId,
+                    TripStartTimestamp = src.TripStartTimestamp,
+                    TripEndTimestamp = src.TripEndTimestamp,
+                    StartLocationAddress = new TripValidationAddress
+                    {
+                        Latitude = addr.Latitude,
+                        Longitude = addr.Longitude,
+                        Road = addr.Address,
+                        Place = addr.Place,
+                        Region = addr.Region
+                    },
+                    ActualRoad = $"[invalid coordinates: {coordError}]",
+                    IsMatch = false
+                });
+                continue;
+            }
+
+            var itemTimer = Stopwatch.StartNew();
+            var geo = PerformLookup(geocoder, request.CountryCode.ToUpper(), addr.Latitude, addr.Longitude, itemTimer, speedLookup);
+
+            // Road: strip house number from expected address then fuzzy-compare
+            // against postal street (addr:street) or nearest road name.
+            var resolvedStreet = geo.Street ?? geo.NearestRoad;
+            var expectedStreet = StripHouseNumber(addr.Address ?? string.Empty);
+            bool roadMatched = FuzzyContains(expectedStreet, resolvedStreet);
+
+            // Proximity fallback: if the primary road didn't match, search within
+            // ProximitySearchRadiusDeg for any road/address-node whose name does match.
+            // This handles cases where the expected road is real but not the nearest one
+            // (e.g. a parallel street just one block away).
+            bool roadMatchedViaProximity = false;
+            string? proximityMatchedRoad = null;
+            double? proximityRoadDistanceMeters = null;
+
+            if (!roadMatched && !string.IsNullOrWhiteSpace(expectedStreet))
+            {
+                var proximity = geocoder.FindNearbyRoadByName(
+                    expectedStreet, addr.Latitude, addr.Longitude, ProximitySearchRadiusDeg);
+                if (proximity.HasValue)
+                {
+                    roadMatched = true;
+                    roadMatchedViaProximity = true;
+                    proximityMatchedRoad = proximity.Value.MatchedName;
+                    proximityRoadDistanceMeters = proximity.Value.DistanceM;
+                }
+            }
+
+            // Place: compare against city, municipality, or suburb — any match counts.
+            // This handles cases like expected "Heddon Greta" matching actualMunicipality
+            // when actualCity is a different neighbouring locality.
+            bool placeMatched = FuzzyContains(addr.Place, geo.City)
+                             || FuzzyContains(addr.Place, geo.Municipality)
+                             || FuzzyContains(addr.Place, geo.Suburb);
+
+            bool isMatch = roadMatched && placeMatched;
+            if (isMatch) matchCount++;
+
+            results.Add(new TripValidationResultItem
+            {
+                TripId = tripId,
+                TripStartTimestamp = src.TripStartTimestamp,
+                TripEndTimestamp = src.TripEndTimestamp,
+                StartLocationAddress = new TripValidationAddress
+                {
+                    Latitude = addr.Latitude,
+                    Longitude = addr.Longitude,
+                    Road = addr.Address,
+                    Place = addr.Place,
+                    Region = addr.Region
+                },
+                ActualRoad = resolvedStreet,
+                ActualNearestRoad = geo.NearestRoad,
+                ActualCity = geo.City,
+                ActualMunicipality = geo.Municipality,
+                ActualRegion = geo.Region,
+                RoadMatched = roadMatched,
+                RoadMatchedViaProximity = roadMatchedViaProximity,
+                ProximityMatchedRoad = proximityMatchedRoad,
+                ProximityRoadDistanceMeters = proximityRoadDistanceMeters,
+                PlaceMatched = placeMatched,
+                IsMatch = isMatch
+            });
+        }
+
+        batchTimer.Stop();
+
+        return Ok(new TripValidationResponse
+        {
+            CountryCode = request.CountryCode.ToUpper(),
+            RequestCount = request.Hits.Count,
+            MatchCount = matchCount,
+            TotalTimeMs = batchTimer.Elapsed.TotalMilliseconds,
+            Results = results
+        });
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>Radius used when searching for a named road nearby a mismatch point (~1.1 km).</summary>
+    private const double ProximitySearchRadiusDeg = 0.01;
+
+    /// <summary>Creates a fresh geocoder for the lookup (used by single-item and batch endpoints).</summary>
     private static ReverseGeocodeResponse PerformLookup(
         string dbPath, string countryCode, double lat, double lon,
         Stopwatch sw, SpeedLimitLookup speedLookup)
     {
         using var geocoder = new ReverseGeocoder(dbPath);
+        return PerformLookup(geocoder, countryCode, lat, lon, sw, speedLookup);
+    }
+
+    /// <summary>Reuses a caller-owned geocoder (used by the validate endpoint for batch efficiency).</summary>
+    private static ReverseGeocodeResponse PerformLookup(
+        ReverseGeocoder geocoder, string countryCode, double lat, double lon,
+        Stopwatch sw, SpeedLimitLookup speedLookup)
+    {
         var result = geocoder.Lookup(lat, lon);
         var roadInfo = speedLookup.GetRoadInfo(lat, lon);
         sw.Stop();
@@ -124,18 +284,47 @@ public class ReverseGeocodeController : ControllerBase
             CountryCode = countryCode,
             HasPlaceData = geocoder.HasPlaceData,
             Street = result.Street,
+            NearestRoad = result.NearestRoad,
             HighwayType = result.HighwayType,
-            StreetDistanceMeters = result.Street != null ? result.StreetDistanceM : null,
+            NearestRoadDistanceMeters = result.NearestRoad != null ? result.NearestRoadDistanceM : null,
             Suburb = result.Suburb,
             SuburbType = result.SuburbType,
             SuburbDistanceMeters = result.Suburb != null ? result.SuburbDistanceM : null,
             City = result.City,
             CityType = result.CityType,
             CityDistanceMeters = result.City != null ? result.CityDistanceM : null,
+            Municipality = result.Municipality,
+            MunicipalityType = result.MunicipalityType,
+            MunicipalityDistanceMeters = result.Municipality != null ? result.MunicipalityDistanceM : null,
+            Region = result.Region,
+            RegionType = result.RegionType,
+            RegionDistanceMeters = result.Region != null ? result.RegionDistanceM : null,
             SpeedLimitKmh = roadInfo?.SpeedLimitKmh,
             IsSpeedLimitInferred = roadInfo?.IsInferred,
             ElapsedMs = sw.Elapsed.TotalMilliseconds
         };
+    }
+
+    /// <summary>
+    /// Removes a leading house number (and optional range) from a mailing address,
+    /// leaving just the street name. E.g. "3 Heddon Street" → "Heddon Street",
+    /// "13A-15B Main Rd" → "Main Rd".
+    /// </summary>
+    private static readonly Regex HouseNumberPrefix =
+        new(@"^\d+[a-zA-Z]?(\s*[-–/]\s*\d+[a-zA-Z]?)?\s+", RegexOptions.Compiled);
+
+    private static string StripHouseNumber(string address) =>
+        HouseNumberPrefix.Replace(address.Trim(), string.Empty).Trim();
+
+    /// <summary>
+    /// Returns true when neither value is null/empty and one contains the other
+    /// (case-insensitive). Handles partial name matches in both directions.
+    /// </summary>
+    private static bool FuzzyContains(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        return a.Contains(b, StringComparison.OrdinalIgnoreCase)
+            || b.Contains(a, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ValidateCoordinates(double lat, double lon, out string error)

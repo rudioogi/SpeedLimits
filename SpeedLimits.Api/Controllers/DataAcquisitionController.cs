@@ -124,7 +124,7 @@ public class DataAcquisitionController : ControllerBase
             var databasePath = _pathResolver.GetPath($"{country.Code.ToLower()}_speedlimits.db");
 
             var builder = new DatabaseBuilder(_dbConfig, country);
-            builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);
+            builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries, extractor.AddressNodes);
 
             // Step 4: Validate
             var validator = new ValidationHelper(databasePath);
@@ -140,6 +140,7 @@ public class DataAcquisitionController : ControllerBase
                 Success = true,
                 RoadSegmentsExtracted = roadSegments.Count,
                 PlaceNodesExtracted = extractor.PlaceNodes.Count,
+                AddressNodesExtracted = extractor.AddressNodes.Count,
                 DatabaseSizeMb = dbFileInfo.Length / (1024.0 * 1024.0),
                 ProcessingTimeMinutes = elapsed.TotalMinutes
             };

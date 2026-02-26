@@ -35,6 +35,7 @@ public class OsmRoadExtractor
 
     public List<PlaceNode> PlaceNodes { get; private set; } = new();
     public List<PlaceBoundary> PlaceBoundaries { get; private set; } = new();
+    public List<AddressNode> AddressNodes { get; private set; } = new();
 
     // Collected during pass 2, consumed after all roads are yielded
     private List<BoundaryRelationInfo> _boundaryRelations = new();
@@ -91,6 +92,7 @@ public class OsmRoadExtractor
         var source = new PBFOsmStreamSource(fileStream);
 
         var placeNodes = new List<PlaceNode>();
+        var addressNodes = new List<AddressNode>();
 
         foreach (var element in source)
         {
@@ -102,20 +104,35 @@ public class OsmRoadExtractor
                     nodes[node.Id.Value] = (node.Latitude.Value, node.Longitude.Value);
                     nodeCount++;
 
-                    // Check for place nodes (city, town, suburb, etc.)
-                    if (node.Tags != null
-                        && node.Tags.TryGetValue("place", out var placeType)
-                        && PlaceTypes.Contains(placeType)
-                        && node.Tags.TryGetValue("name", out var placeName))
+                    if (node.Tags != null)
                     {
-                        placeNodes.Add(new PlaceNode
+                        // Place nodes (city, town, suburb, etc.)
+                        if (node.Tags.TryGetValue("place", out var placeType)
+                            && PlaceTypes.Contains(placeType)
+                            && node.Tags.TryGetValue("name", out var placeName))
                         {
-                            OsmNodeId = node.Id.Value,
-                            Name = placeName,
-                            PlaceType = placeType,
-                            Latitude = node.Latitude.Value,
-                            Longitude = node.Longitude.Value
-                        });
+                            placeNodes.Add(new PlaceNode
+                            {
+                                OsmNodeId = node.Id.Value,
+                                Name = placeName,
+                                PlaceType = placeType,
+                                Latitude = node.Latitude.Value,
+                                Longitude = node.Longitude.Value
+                            });
+                        }
+
+                        // Address nodes — postal street name source
+                        if (node.Tags.TryGetValue("addr:street", out var addrStreet)
+                            && !string.IsNullOrWhiteSpace(addrStreet))
+                        {
+                            addressNodes.Add(new AddressNode
+                            {
+                                OsmNodeId = node.Id.Value,
+                                Latitude = node.Latitude.Value,
+                                Longitude = node.Longitude.Value,
+                                Street = addrStreet
+                            });
+                        }
                     }
 
                     // Report progress every second
@@ -129,7 +146,8 @@ public class OsmRoadExtractor
         }
 
         PlaceNodes = placeNodes;
-        progress.Complete($"{nodeCount:N0} nodes collected, {placeNodes.Count:N0} place nodes found");
+        AddressNodes = addressNodes;
+        progress.Complete($"{nodeCount:N0} nodes collected, {placeNodes.Count:N0} place nodes, {addressNodes.Count:N0} address nodes found");
         return nodes;
     }
 
@@ -223,8 +241,9 @@ public class OsmRoadExtractor
         if (tags.TryGetValue("admin_level", out var levelStr))
             int.TryParse(levelStr, out adminLevel);
 
-        // Filter: only admin_level >= 6 (skip country/state borders), or place-tagged
-        if (!hasPlaceTag && adminLevel < 6)
+        // Filter: admin_level 4+ (states/provinces) and above; skip country (2) and above-country (0-3).
+        // Place-tagged relations bypass the admin_level filter entirely.
+        if (!hasPlaceTag && adminLevel < 4)
             return null;
 
         // Determine boundary type
@@ -235,10 +254,13 @@ public class OsmRoadExtractor
         }
         else
         {
+            // Admin-only boundaries (no place= tag): store as region or administrative.
+            // "city" / "suburb" types are reserved for place=-tagged boundaries so that
+            // geocoder city lookups return common-usage names, not LGA names.
             boundaryType = adminLevel switch
             {
-                <= 7 => "city",
-                _ => "suburb"
+                <= 5 => "region",
+                _ => "administrative"
             };
         }
 

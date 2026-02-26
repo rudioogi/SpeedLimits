@@ -1,5 +1,5 @@
 using Microsoft.Data.Sqlite;
-using OsmDataAcquisition.Models;
+using SpeedLimits.Core.Models;
 using SpeedLimits.Api.Models;
 
 namespace SpeedLimits.Api.Services;

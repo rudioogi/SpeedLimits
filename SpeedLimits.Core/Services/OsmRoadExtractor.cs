@@ -1,10 +1,10 @@
 using OsmSharp;
 using OsmSharp.Streams;
-using OsmDataAcquisition.Configuration;
-using OsmDataAcquisition.Models;
-using OsmDataAcquisition.Utilities;
+using SpeedLimits.Core.Configuration;
+using SpeedLimits.Core.Models;
+using SpeedLimits.Core.Utilities;
 
-namespace OsmDataAcquisition.Services;
+namespace SpeedLimits.Core.Services;
 
 /// <summary>
 /// Extracts road segments, place nodes and boundary polygons from OSM PBF files.

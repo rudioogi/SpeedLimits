@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using OsmDataAcquisition.Services;
+using SpeedLimits.Core;
+using SpeedLimits.Core.Services;
 using SpeedLimits.Api.Models;
 using SpeedLimits.Api.Services;
 
@@ -44,8 +45,9 @@ public class ReverseGeocodeController : ControllerBase
         if (dbPath == null)
             return NotFound(new { error = $"Database for country '{country}' not found." });
 
+        using var speedLookup = new SpeedLimitLookup(dbPath);
         var sw = Stopwatch.StartNew();
-        var response = PerformLookup(dbPath, country.ToUpper(), lat, lon, sw);
+        var response = PerformLookup(dbPath, country.ToUpper(), lat, lon, sw, speedLookup);
         return Ok(response);
     }
 
@@ -67,6 +69,7 @@ public class ReverseGeocodeController : ControllerBase
         if (dbPath == null)
             return NotFound(new { error = $"Database for country '{request.CountryCode}' not found." });
 
+        using var speedLookup = new SpeedLimitLookup(dbPath);
         var batchTimer = Stopwatch.StartNew();
         var results = new List<ReverseGeocodeResponse>(request.Coordinates.Count);
 
@@ -88,7 +91,7 @@ public class ReverseGeocodeController : ControllerBase
             }
 
             var itemTimer = Stopwatch.StartNew();
-            var entry = PerformLookup(dbPath, request.CountryCode.ToUpper(), coord.Latitude, coord.Longitude, itemTimer);
+            var entry = PerformLookup(dbPath, request.CountryCode.ToUpper(), coord.Latitude, coord.Longitude, itemTimer, speedLookup);
             results.Add(entry);
         }
 
@@ -106,10 +109,12 @@ public class ReverseGeocodeController : ControllerBase
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static ReverseGeocodeResponse PerformLookup(
-        string dbPath, string countryCode, double lat, double lon, Stopwatch sw)
+        string dbPath, string countryCode, double lat, double lon,
+        Stopwatch sw, SpeedLimitLookup speedLookup)
     {
         using var geocoder = new ReverseGeocoder(dbPath);
         var result = geocoder.Lookup(lat, lon);
+        var roadInfo = speedLookup.GetRoadInfo(lat, lon);
         sw.Stop();
 
         return new ReverseGeocodeResponse
@@ -127,6 +132,8 @@ public class ReverseGeocodeController : ControllerBase
             City = result.City,
             CityType = result.CityType,
             CityDistanceMeters = result.City != null ? result.CityDistanceM : null,
+            SpeedLimitKmh = roadInfo?.SpeedLimitKmh,
+            IsSpeedLimitInferred = roadInfo?.IsInferred,
             ElapsedMs = sw.Elapsed.TotalMilliseconds
         };
     }

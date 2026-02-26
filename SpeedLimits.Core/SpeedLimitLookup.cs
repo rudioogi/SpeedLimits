@@ -10,7 +10,7 @@
 using Microsoft.Data.Sqlite;
 using System;
 
-namespace SpeedLimitLookup
+namespace SpeedLimits.Core
 {
     /// <summary>
     /// Fast speed limit lookup optimized for IoT devices

@@ -1,7 +1,7 @@
-using OsmDataAcquisition.Configuration;
-using OsmDataAcquisition.Utilities;
+using SpeedLimits.Core.Configuration;
+using SpeedLimits.Core.Utilities;
 
-namespace OsmDataAcquisition.Services;
+namespace SpeedLimits.Core.Services;
 
 /// <summary>
 /// Downloads OSM PBF files from Geofabrik with retry logic

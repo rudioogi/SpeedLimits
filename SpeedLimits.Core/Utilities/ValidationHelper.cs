@@ -1,8 +1,8 @@
 using Microsoft.Data.Sqlite;
-using OsmDataAcquisition.Models;
-using OsmDataAcquisition.Services;
+using SpeedLimits.Core.Models;
+using SpeedLimits.Core.Services;
 
-namespace OsmDataAcquisition.Utilities;
+namespace SpeedLimits.Core.Utilities;
 
 /// <summary>
 /// Validates database contents and reports statistics

@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Models;
+namespace SpeedLimits.Core.Models;
 
 /// <summary>
 /// Represents a named place node extracted from OSM data (city, town, suburb, etc.)

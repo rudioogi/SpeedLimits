@@ -1,0 +1,35 @@
+i determined from a gps location service that the provided lat and long ptduced the following :
+"startLocationAddress": {
+        "latitude": -37.913200378418,
+        "longitude": 145.352401733398,
+        "road": "31 Edward Street",
+        "place": "Melbourne",
+        "region": "Victoria"
+      },	  
+however  another comparative service returns this :
+      "actualRoad": "Benson Street",
+      "actualCity": "Shire of Yarra Ranges",
+      "actualRegion": "Victoria",
+      "isMatch": false
+	  
+	  ok lets improve the validator , lets use a good fuzzy mathcing? / comparison approach , eg road street numbers dont need to match, we can compare munucipality to place instead of just city..
+	  eg, this would have returned isMatch=true 	  
+	  
+	  tripId": "1937f133-4336-4bb4-8672-19866ba75dd2",
+      "tripStartTimestamp": "2026-02-05T01:15:29.457Z",
+      "tripEndTimestamp": "2026-02-05T02:08:41.169Z",
+      "startLocationAddress": {
+        "latitude": -32.8033981323242,
+        "longitude": 151.514404296875,
+        "road": "3 Heddon Street",
+        "place": "Heddon Greta",
+        "region": "New South Wales"
+      },
+      "actualRoad": "Heddon Street",
+      "actualNearestRoad": "Heddon Street",
+      "actualCity": "Kurri Kurri",
+      "actualMunicipality": "Heddon Greta",
+      "actualRegion": "New South Wales",
+      "isMatch": false
+	  
+	 [Guid("32C241FD-9C26-4CEA-8150-BD8CABC61C6F")]

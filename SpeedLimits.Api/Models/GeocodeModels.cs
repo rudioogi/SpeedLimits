@@ -121,6 +121,15 @@ public class TripValidationResultItem
     public string? ActualMunicipality { get; init; }
     public string? ActualRegion { get; init; }
     public bool RoadMatched { get; init; }
+    /// <summary>
+    /// True when the primary road lookup returned a different name but the expected
+    /// road was found within the proximity search radius.
+    /// </summary>
+    public bool RoadMatchedViaProximity { get; init; }
+    /// <summary>Name of the road that satisfied the proximity match (may differ in case/abbreviation).</summary>
+    public string? ProximityMatchedRoad { get; init; }
+    /// <summary>Distance in metres from the query point to the proximity-matched road segment.</summary>
+    public double? ProximityRoadDistanceMeters { get; init; }
     public bool PlaceMatched { get; init; }
     public bool IsMatch { get; init; }
 }

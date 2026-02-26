@@ -280,6 +280,85 @@ public class ReverseGeocoder : IDisposable
         return result;
     }
 
+    // ── Proximity road name search ───────────────────────────────────────────
+
+    /// <summary>
+    /// Searches within <paramref name="radiusDeg"/> degrees for any road segment
+    /// (or addr:street node, if available) whose name fuzzy-matches
+    /// <paramref name="expectedName"/>. Returns the closest match found, or null.
+    /// <para>
+    /// Intended as a secondary check: when the primary nearest-road lookup returns
+    /// a different road name, call this to see whether the expected road actually
+    /// exists nearby before declaring a mismatch.
+    /// </para>
+    /// </summary>
+    public (string MatchedName, double DistanceM)? FindNearbyRoadByName(
+        string expectedName, double latitude, double longitude, double radiusDeg = 0.01)
+    {
+        var queryPoint = new GeoPoint(latitude, longitude);
+        string? bestName = null;
+        double bestDist = double.MaxValue;
+
+        // ── road_segments ────────────────────────────────────────────────────
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = @"
+                SELECT name, center_lat, center_lon
+                FROM road_segments
+                WHERE name IS NOT NULL
+                  AND center_lat BETWEEN @lat - @radius AND @lat + @radius
+                  AND center_lon BETWEEN @lon - @radius AND @lon + @radius";
+            cmd.Parameters.AddWithValue("@lat", latitude);
+            cmd.Parameters.AddWithValue("@lon", longitude);
+            cmd.Parameters.AddWithValue("@radius", radiusDeg);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var name = reader.GetString(0);
+                if (!FuzzyContains(expectedName, name)) continue;
+
+                var pt = new GeoPoint(reader.GetDouble(1), reader.GetDouble(2));
+                var dist = queryPoint.DistanceTo(pt);
+                if (dist < bestDist) { bestDist = dist; bestName = name; }
+            }
+        }
+
+        // ── address_nodes (postal street names) ──────────────────────────────
+        if (_hasAddressNodesTable)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+                SELECT street, latitude, longitude
+                FROM address_nodes
+                WHERE latitude  BETWEEN @lat - @radius AND @lat + @radius
+                  AND longitude BETWEEN @lon - @radius AND @lon + @radius";
+            cmd.Parameters.AddWithValue("@lat", latitude);
+            cmd.Parameters.AddWithValue("@lon", longitude);
+            cmd.Parameters.AddWithValue("@radius", radiusDeg);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var street = reader.GetString(0);
+                if (!FuzzyContains(expectedName, street)) continue;
+
+                var pt = new GeoPoint(reader.GetDouble(1), reader.GetDouble(2));
+                var dist = queryPoint.DistanceTo(pt);
+                if (dist < bestDist) { bestDist = dist; bestName = street; }
+            }
+        }
+
+        return bestName != null ? (bestName, bestDist) : null;
+    }
+
+    private static bool FuzzyContains(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        return a.Contains(b, StringComparison.OrdinalIgnoreCase)
+            || b.Contains(a, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ── Polygon helpers ─────────────────────────────────────────────────────
 
     /// <summary>

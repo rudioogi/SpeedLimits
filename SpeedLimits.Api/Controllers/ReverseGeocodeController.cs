@@ -127,6 +127,8 @@ public class ReverseGeocodeController : ControllerBase
             return NotFound(new { error = $"Database for country '{request.CountryCode}' not found." });
 
         using var speedLookup = new SpeedLimitLookup(dbPath);
+        // Share one geocoder instance across all items in the batch for efficiency.
+        using var geocoder = new ReverseGeocoder(dbPath);
         var batchTimer = Stopwatch.StartNew();
         var results = new List<TripValidationResultItem>(request.Hits.Count);
         int matchCount = 0;
@@ -174,13 +176,34 @@ public class ReverseGeocodeController : ControllerBase
             }
 
             var itemTimer = Stopwatch.StartNew();
-            var geo = PerformLookup(dbPath, request.CountryCode.ToUpper(), addr.Latitude, addr.Longitude, itemTimer, speedLookup);
+            var geo = PerformLookup(geocoder, request.CountryCode.ToUpper(), addr.Latitude, addr.Longitude, itemTimer, speedLookup);
 
             // Road: strip house number from expected address then fuzzy-compare
-            // against postal street (addr:street) or nearest road name
+            // against postal street (addr:street) or nearest road name.
             var resolvedStreet = geo.Street ?? geo.NearestRoad;
             var expectedStreet = StripHouseNumber(addr.Address ?? string.Empty);
             bool roadMatched = FuzzyContains(expectedStreet, resolvedStreet);
+
+            // Proximity fallback: if the primary road didn't match, search within
+            // ProximitySearchRadiusDeg for any road/address-node whose name does match.
+            // This handles cases where the expected road is real but not the nearest one
+            // (e.g. a parallel street just one block away).
+            bool roadMatchedViaProximity = false;
+            string? proximityMatchedRoad = null;
+            double? proximityRoadDistanceMeters = null;
+
+            if (!roadMatched && !string.IsNullOrWhiteSpace(expectedStreet))
+            {
+                var proximity = geocoder.FindNearbyRoadByName(
+                    expectedStreet, addr.Latitude, addr.Longitude, ProximitySearchRadiusDeg);
+                if (proximity.HasValue)
+                {
+                    roadMatched = true;
+                    roadMatchedViaProximity = true;
+                    proximityMatchedRoad = proximity.Value.MatchedName;
+                    proximityRoadDistanceMeters = proximity.Value.DistanceM;
+                }
+            }
 
             // Place: compare against city, municipality, or suburb — any match counts.
             // This handles cases like expected "Heddon Greta" matching actualMunicipality
@@ -211,6 +234,9 @@ public class ReverseGeocodeController : ControllerBase
                 ActualMunicipality = geo.Municipality,
                 ActualRegion = geo.Region,
                 RoadMatched = roadMatched,
+                RoadMatchedViaProximity = roadMatchedViaProximity,
+                ProximityMatchedRoad = proximityMatchedRoad,
+                ProximityRoadDistanceMeters = proximityRoadDistanceMeters,
                 PlaceMatched = placeMatched,
                 IsMatch = isMatch
             });
@@ -230,11 +256,23 @@ public class ReverseGeocodeController : ControllerBase
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>Radius used when searching for a named road nearby a mismatch point (~1.1 km).</summary>
+    private const double ProximitySearchRadiusDeg = 0.01;
+
+    /// <summary>Creates a fresh geocoder for the lookup (used by single-item and batch endpoints).</summary>
     private static ReverseGeocodeResponse PerformLookup(
         string dbPath, string countryCode, double lat, double lon,
         Stopwatch sw, SpeedLimitLookup speedLookup)
     {
         using var geocoder = new ReverseGeocoder(dbPath);
+        return PerformLookup(geocoder, countryCode, lat, lon, sw, speedLookup);
+    }
+
+    /// <summary>Reuses a caller-owned geocoder (used by the validate endpoint for batch efficiency).</summary>
+    private static ReverseGeocodeResponse PerformLookup(
+        ReverseGeocoder geocoder, string countryCode, double lat, double lon,
+        Stopwatch sw, SpeedLimitLookup speedLookup)
+    {
         var result = geocoder.Lookup(lat, lon);
         var roadInfo = speedLookup.GetRoadInfo(lat, lon);
         sw.Stop();

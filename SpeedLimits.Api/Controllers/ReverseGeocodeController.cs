@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using SpeedLimits.Core;
 using SpeedLimits.Core.Services;
@@ -133,8 +134,23 @@ public class ReverseGeocodeController : ControllerBase
         foreach (var hit in request.Hits)
         {
             var src = hit.Source;
-            var addr = src.StartLocationAddress;
-            var tripId = !string.IsNullOrEmpty(hit.Id) ? hit.Id : src.Id;
+            var addr = src?.StartLocationAddress;
+            var tripId = hit.Id ?? src?.Id ?? "(unknown)";
+
+            // Skip hits where source or coordinates are missing
+            if (src == null || addr == null)
+            {
+                results.Add(new TripValidationResultItem
+                {
+                    TripId = tripId,
+                    TripStartTimestamp = src?.TripStartTimestamp,
+                    TripEndTimestamp = src?.TripEndTimestamp,
+                    StartLocationAddress = new TripValidationAddress(),
+                    ActualRoad = "[missing source or startLocationAddress]",
+                    IsMatch = false
+                });
+                continue;
+            }
 
             if (!ValidateCoordinates(addr.Latitude, addr.Longitude, out var coordError))
             {
@@ -160,21 +176,20 @@ public class ReverseGeocodeController : ControllerBase
             var itemTimer = Stopwatch.StartNew();
             var geo = PerformLookup(dbPath, request.CountryCode.ToUpper(), addr.Latitude, addr.Longitude, itemTimer, speedLookup);
 
-            // Road: prefer postal Street (addr:street), fall back to NearestRoad
+            // Road: strip house number from expected address then fuzzy-compare
+            // against postal street (addr:street) or nearest road name
             var resolvedStreet = geo.Street ?? geo.NearestRoad;
+            var expectedStreet = StripHouseNumber(addr.Address ?? string.Empty);
+            bool roadMatched = FuzzyContains(expectedStreet, resolvedStreet);
 
-            // Expected address (with house number) should contain the actual street name
-            bool roadMatched = !string.IsNullOrEmpty(addr.Address)
-                && !string.IsNullOrEmpty(resolvedStreet)
-                && addr.Address.Contains(resolvedStreet, StringComparison.OrdinalIgnoreCase);
+            // Place: compare against city, municipality, or suburb — any match counts.
+            // This handles cases like expected "Heddon Greta" matching actualMunicipality
+            // when actualCity is a different neighbouring locality.
+            bool placeMatched = FuzzyContains(addr.Place, geo.City)
+                             || FuzzyContains(addr.Place, geo.Municipality)
+                             || FuzzyContains(addr.Place, geo.Suburb);
 
-            // City: either value contains the other (handles "Greater Sydney" vs "Sydney" etc.)
-            bool cityMatched = !string.IsNullOrEmpty(addr.Place)
-                && !string.IsNullOrEmpty(geo.City)
-                && (geo.City.Contains(addr.Place, StringComparison.OrdinalIgnoreCase)
-                    || addr.Place.Contains(geo.City, StringComparison.OrdinalIgnoreCase));
-
-            bool isMatch = roadMatched && cityMatched;
+            bool isMatch = roadMatched && placeMatched;
             if (isMatch) matchCount++;
 
             results.Add(new TripValidationResultItem
@@ -195,6 +210,8 @@ public class ReverseGeocodeController : ControllerBase
                 ActualCity = geo.City,
                 ActualMunicipality = geo.Municipality,
                 ActualRegion = geo.Region,
+                RoadMatched = roadMatched,
+                PlaceMatched = placeMatched,
                 IsMatch = isMatch
             });
         }
@@ -248,6 +265,28 @@ public class ReverseGeocodeController : ControllerBase
             IsSpeedLimitInferred = roadInfo?.IsInferred,
             ElapsedMs = sw.Elapsed.TotalMilliseconds
         };
+    }
+
+    /// <summary>
+    /// Removes a leading house number (and optional range) from a mailing address,
+    /// leaving just the street name. E.g. "3 Heddon Street" → "Heddon Street",
+    /// "13A-15B Main Rd" → "Main Rd".
+    /// </summary>
+    private static readonly Regex HouseNumberPrefix =
+        new(@"^\d+[a-zA-Z]?(\s*[-–/]\s*\d+[a-zA-Z]?)?\s+", RegexOptions.Compiled);
+
+    private static string StripHouseNumber(string address) =>
+        HouseNumberPrefix.Replace(address.Trim(), string.Empty).Trim();
+
+    /// <summary>
+    /// Returns true when neither value is null/empty and one contains the other
+    /// (case-insensitive). Handles partial name matches in both directions.
+    /// </summary>
+    private static bool FuzzyContains(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        return a.Contains(b, StringComparison.OrdinalIgnoreCase)
+            || b.Contains(a, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool ValidateCoordinates(double lat, double lon, out string error)

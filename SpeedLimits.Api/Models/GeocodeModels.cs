@@ -76,18 +76,24 @@ public class TripValidationRequest
 public class TripHit
 {
     [JsonPropertyName("_id")]
-    public string Id { get; set; } = string.Empty;
+    public string? Id { get; set; }
+
+    [JsonPropertyName("_index")]
+    public string? Index { get; set; }
+
+    [JsonPropertyName("_score")]
+    public double? Score { get; set; }
 
     [JsonPropertyName("_source")]
-    public required TripSource Source { get; set; }
+    public TripSource? Source { get; set; }
 }
 
 public class TripSource
 {
-    public string TripStartTimestamp { get; set; } = string.Empty;
-    public string TripEndTimestamp { get; set; } = string.Empty;
-    public string Id { get; set; } = string.Empty;
-    public required TripLocationAddress StartLocationAddress { get; set; }
+    public string? TripStartTimestamp { get; set; }
+    public string? TripEndTimestamp { get; set; }
+    public string? Id { get; set; }
+    public TripLocationAddress? StartLocationAddress { get; set; }
     public TripLocationAddress? EndLocationAddress { get; set; }
 }
 
@@ -104,9 +110,9 @@ public class TripLocationAddress
 public class TripValidationResultItem
 {
     public required string TripId { get; init; }
-    public required string TripStartTimestamp { get; init; }
-    public required string TripEndTimestamp { get; init; }
-    public required TripValidationAddress StartLocationAddress { get; init; }
+    public string? TripStartTimestamp { get; init; }
+    public string? TripEndTimestamp { get; init; }
+    public TripValidationAddress StartLocationAddress { get; init; } = new();
     /// <summary>Postal street name from addr:street (mailing-address style).</summary>
     public string? ActualRoad { get; init; }
     /// <summary>Road way name from the nearest named road segment.</summary>
@@ -114,6 +120,8 @@ public class TripValidationResultItem
     public string? ActualCity { get; init; }
     public string? ActualMunicipality { get; init; }
     public string? ActualRegion { get; init; }
+    public bool RoadMatched { get; init; }
+    public bool PlaceMatched { get; init; }
     public bool IsMatch { get; init; }
 }
 

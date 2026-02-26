@@ -92,7 +92,6 @@ public class DatabaseBuilder
         ExecuteNonQuery(connection, $"PRAGMA page_size = {_config.PageSize}");
         ExecuteNonQuery(connection, "PRAGMA synchronous = NORMAL");
         ExecuteNonQuery(connection, "PRAGMA temp_store = MEMORY");
-        ExecuteNonQuery(connection, "PRAGMA locking_mode = EXCLUSIVE");
     }
 
     /// <summary>

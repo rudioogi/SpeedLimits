@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Models;
+namespace SpeedLimits.Core.Models;
 
 /// <summary>
 /// Represents an administrative boundary polygon extracted from OSM relation data.

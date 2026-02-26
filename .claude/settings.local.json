@@ -8,7 +8,10 @@
       "Bash(dotnet build:*)",
       "Bash(./OsmDataAcquisition.exe)",
       "Bash(timeout 3 dotnet run:*)",
-      "Bash(cd C:\\\\Dev\\\\SandBox\\\\SpeedLimits:*)"
+      "Bash(cd C:\\\\Dev\\\\SandBox\\\\SpeedLimits:*)",
+      "Bash(git mv:*)",
+      "Bash(git rm:*)",
+      "Bash(rm:*)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Models;
+namespace SpeedLimits.Core.Models;
 
 /// <summary>
 /// Represents a road segment extracted from OSM data

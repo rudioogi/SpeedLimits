@@ -1,9 +1,9 @@
 using Microsoft.Data.Sqlite;
-using OsmDataAcquisition.Configuration;
-using OsmDataAcquisition.Models;
-using OsmDataAcquisition.Utilities;
+using SpeedLimits.Core.Configuration;
+using SpeedLimits.Core.Models;
+using SpeedLimits.Core.Utilities;
 
-namespace OsmDataAcquisition.Services;
+namespace SpeedLimits.Core.Services;
 
 /// <summary>
 /// Builds optimized SQLite database with spatial grid indexing

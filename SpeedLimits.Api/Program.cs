@@ -1,5 +1,5 @@
 using Microsoft.Extensions.Options;
-using OsmDataAcquisition.Configuration;
+using SpeedLimits.Core.Configuration;
 using SpeedLimits.Api.Services;
 
 namespace SpeedLimits.Api;

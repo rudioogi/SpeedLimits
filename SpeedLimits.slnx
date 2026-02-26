@@ -1,4 +1,5 @@
 <Solution>
-  <Project Path="OsmDataAcquisition.csproj" />
+  <Project Path="SpeedLimits.Core/SpeedLimits.Core.csproj" />
+  <Project Path="SpeedLimits.Console/SpeedLimits.Console.csproj" />
   <Project Path="SpeedLimits.Api/SpeedLimits.Api.csproj" />
 </Solution>

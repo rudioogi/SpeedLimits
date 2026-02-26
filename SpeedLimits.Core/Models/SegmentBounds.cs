@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Models;
+namespace SpeedLimits.Core.Models;
 
 /// <summary>
 /// Extends Bounds with a center point for efficient spatial queries

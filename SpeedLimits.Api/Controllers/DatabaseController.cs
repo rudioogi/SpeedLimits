@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using OsmDataAcquisition.Configuration;
+using SpeedLimits.Core.Configuration;
 using SpeedLimits.Api.Models;
 using SpeedLimits.Api.Services;
 

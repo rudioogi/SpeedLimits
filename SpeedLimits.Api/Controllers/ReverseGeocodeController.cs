@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using OsmDataAcquisition.Services;
+using SpeedLimits.Core.Services;
 using SpeedLimits.Api.Models;
 using SpeedLimits.Api.Services;
 

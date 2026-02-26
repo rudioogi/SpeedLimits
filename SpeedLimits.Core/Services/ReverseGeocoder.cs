@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
-using OsmDataAcquisition.Models;
+using SpeedLimits.Core.Models;
 
-namespace OsmDataAcquisition.Services;
+namespace SpeedLimits.Core.Services;
 
 /// <summary>
 /// Reverse geocodes GPS coordinates to street/suburb/city using the speed limit database.

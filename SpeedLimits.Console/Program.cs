@@ -1,11 +1,11 @@
 using Microsoft.Extensions.Configuration;
-using OsmDataAcquisition.Configuration;
-using OsmDataAcquisition.Models;
-using OsmDataAcquisition.Services;
-using OsmDataAcquisition.Utilities;
+using SpeedLimits.Core.Configuration;
+using SpeedLimits.Core.Models;
+using SpeedLimits.Core.Services;
+using SpeedLimits.Core.Utilities;
 using Microsoft.Data.Sqlite;
 
-namespace OsmDataAcquisition;
+namespace SpeedLimits.ConsoleApp;
 
 class Program
 {

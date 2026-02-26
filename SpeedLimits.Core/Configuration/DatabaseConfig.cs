@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Configuration;
+namespace SpeedLimits.Core.Configuration;
 
 /// <summary>
 /// Configuration for database creation and optimization

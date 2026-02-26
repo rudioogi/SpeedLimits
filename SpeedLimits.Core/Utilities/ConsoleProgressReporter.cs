@@ -1,4 +1,4 @@
-namespace OsmDataAcquisition.Utilities;
+namespace SpeedLimits.Core.Utilities;
 
 /// <summary>
 /// Reports progress to console with formatted output

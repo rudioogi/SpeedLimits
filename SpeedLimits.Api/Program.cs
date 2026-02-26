@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using SpeedLimits.Core.Configuration;
+using SpeedLimits.Api.Configuration;
 using SpeedLimits.Api.Services;
 
 namespace SpeedLimits.Api;
@@ -23,6 +24,8 @@ public class Program
         });
 
         // Configuration bindings
+        builder.Services.Configure<DatabaseSettings>(
+            builder.Configuration.GetSection(DatabaseSettings.SectionName));
         builder.Services.Configure<DataAcquisitionConfig>(
             builder.Configuration.GetSection("DataAcquisition"));
         builder.Services.Configure<DatabaseConfig>(

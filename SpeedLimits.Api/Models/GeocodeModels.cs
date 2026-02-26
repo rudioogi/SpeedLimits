@@ -15,6 +15,10 @@ public class ReverseGeocodeResponse
     public string? City { get; init; }
     public string? CityType { get; init; }
     public double? CityDistanceMeters { get; init; }
+    /// <summary>Speed limit in km/h for the nearest road, or null if not found.</summary>
+    public int? SpeedLimitKmh { get; init; }
+    /// <summary>True if the speed limit was inferred from highway type rather than an explicit maxspeed tag.</summary>
+    public bool? IsSpeedLimitInferred { get; init; }
     /// <summary>Time taken to process this single lookup, in milliseconds.</summary>
     public double ElapsedMs { get; init; }
 }

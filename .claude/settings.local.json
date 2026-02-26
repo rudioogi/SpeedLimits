@@ -11,7 +11,10 @@
       "Bash(cd C:\\\\Dev\\\\SandBox\\\\SpeedLimits:*)",
       "Bash(git mv:*)",
       "Bash(git rm:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(dotnet sln:*)",
+      "Bash(dotnet:*)",
+      "Bash(ls:*)"
     ]
   }
 }

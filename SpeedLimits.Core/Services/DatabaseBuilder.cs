@@ -24,7 +24,8 @@ public class DatabaseBuilder
     /// </summary>
     public void BuildDatabase(string databasePath, IEnumerable<RoadSegment> roadSegments,
         IReadOnlyList<PlaceNode>? placeNodes = null,
-        IReadOnlyList<PlaceBoundary>? placeBoundaries = null)
+        IReadOnlyList<PlaceBoundary>? placeBoundaries = null,
+        IReadOnlyList<AddressNode>? addressNodes = null)
     {
         ConsoleProgressReporter.Report("Building SQLite database...");
 
@@ -63,8 +64,15 @@ public class DatabaseBuilder
                 boundaryCount = InsertBoundaryData(connection, placeBoundaries);
             }
 
+            // Insert address nodes (addr:street — postal street names)
+            var addressNodeCount = 0;
+            if (addressNodes != null && addressNodes.Count > 0)
+            {
+                addressNodeCount = InsertAddressNodeData(connection, addressNodes);
+            }
+
             // Insert metadata
-            InsertMetadata(connection, worldBounds, placeCount, boundaryCount);
+            InsertMetadata(connection, worldBounds, placeCount, boundaryCount, addressNodeCount);
 
             transaction.Commit();
             ConsoleProgressReporter.Report("Transaction committed successfully");
@@ -161,12 +169,23 @@ public class DatabaseBuilder
                 polygon_blob BLOB NOT NULL
             )");
 
+        // Address nodes (addr:street — postal street name lookup)
+        ExecuteNonQuery(connection, @"
+            CREATE TABLE address_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                osm_node_id INTEGER NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                street TEXT NOT NULL
+            )");
+
         // Create indexes (only those used by lookup queries)
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_bounds ON road_segments(min_lat, max_lat, min_lon, max_lon)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_center ON road_segments(center_lat, center_lon)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_spatial_grid_cells ON spatial_grid(grid_x, grid_y)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_places_type_coords ON places(place_type, latitude, longitude)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_place_boundaries_bbox ON place_boundaries(boundary_type, min_lat, max_lat, min_lon, max_lon)");
+        ExecuteNonQuery(connection, "CREATE INDEX idx_address_nodes_coords ON address_nodes(latitude, longitude)");
     }
 
     /// <summary>
@@ -405,10 +424,42 @@ public class DatabaseBuilder
     }
 
     /// <summary>
+    /// Inserts address node data (addr:street postal names).
+    /// </summary>
+    private int InsertAddressNodeData(SqliteConnection connection, IReadOnlyList<AddressNode> addressNodes)
+    {
+        var progress = new ConsoleProgressReporter("Inserting address nodes");
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO address_nodes (osm_node_id, latitude, longitude, street)
+            VALUES (@osm_node_id, @latitude, @longitude, @street)";
+
+        var pId  = cmd.Parameters.Add("@osm_node_id", SqliteType.Integer);
+        var pLat = cmd.Parameters.Add("@latitude",    SqliteType.Real);
+        var pLon = cmd.Parameters.Add("@longitude",   SqliteType.Real);
+        var pStr = cmd.Parameters.Add("@street",      SqliteType.Text);
+
+        var count = 0;
+        foreach (var node in addressNodes)
+        {
+            pId.Value  = node.OsmNodeId;
+            pLat.Value = node.Latitude;
+            pLon.Value = node.Longitude;
+            pStr.Value = node.Street;
+            cmd.ExecuteNonQuery();
+            count++;
+        }
+
+        progress.Complete($"{count:N0} address nodes inserted");
+        return count;
+    }
+
+    /// <summary>
     /// Inserts metadata
     /// </summary>
     private void InsertMetadata(SqliteConnection connection, Bounds worldBounds,
-        int placeCount = 0, int boundaryCount = 0)
+        int placeCount = 0, int boundaryCount = 0, int addressNodeCount = 0)
     {
         var metadata = new Dictionary<string, string>
         {
@@ -422,7 +473,8 @@ public class DatabaseBuilder
             ["max_longitude"] = worldBounds.MaxLongitude.ToString("F6"),
             ["osm_source"] = _countryConfig.GeofabrikUrl,
             ["place_count"] = placeCount.ToString(),
-            ["boundary_count"] = boundaryCount.ToString()
+            ["boundary_count"] = boundaryCount.ToString(),
+            ["address_node_count"] = addressNodeCount.ToString()
         };
 
         using var cmd = connection.CreateCommand();

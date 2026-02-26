@@ -564,8 +564,10 @@ class Program
             Console.WriteLine("─────────────────────────────────────────────────────────────");
 
             if (result.Street != null)
-                Console.WriteLine($"  Street:  {result.Street} [{result.HighwayType}] ({result.StreetDistanceM:F0}m away)");
-            else
+                Console.WriteLine($"  Street (postal):  {result.Street}");
+            if (result.NearestRoad != null)
+                Console.WriteLine($"  Nearest road:     {result.NearestRoad} [{result.HighwayType}] ({result.NearestRoadDistanceM:F0}m away)");
+            if (result.Street == null && result.NearestRoad == null)
                 Console.WriteLine($"  Street:  (not found)");
 
             if (result.Suburb != null)
@@ -574,9 +576,11 @@ class Program
                 Console.WriteLine($"  Suburb:  (not found)");
 
             if (result.City != null)
-                Console.WriteLine($"  City:    {result.City} [{result.CityType}] ({result.CityDistanceM:F0}m away)");
+                Console.WriteLine($"  City:         {result.City} [{result.CityType}] ({result.CityDistanceM:F0}m away)");
             else
-                Console.WriteLine($"  City:    (not found)");
+                Console.WriteLine($"  City:         (not found)");
+            if (result.Municipality != null)
+                Console.WriteLine($"  Municipality: {result.Municipality} [{result.MunicipalityType}]");
 
             Console.WriteLine("─────────────────────────────────────────────────────────────");
         }
@@ -622,6 +626,7 @@ class Program
 
         Console.WriteLine($"Total road segments extracted: {roadSegments.Count:N0}");
         Console.WriteLine($"Total place nodes extracted: {extractor.PlaceNodes.Count:N0}");
+        Console.WriteLine($"Total address nodes extracted: {extractor.AddressNodes.Count:N0}");
         Console.WriteLine();
 
         if (roadSegments.Count == 0)
@@ -636,7 +641,7 @@ class Program
         var databasePath = GetDatabasePath($"{country.Code.ToLower()}_speedlimits.db");
 
         var builder = new DatabaseBuilder(dbConfig, country);
-        builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);
+        builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries, extractor.AddressNodes);
 
         var dbFileInfo = new FileInfo(databasePath);
         Console.WriteLine($"Database size: {dbFileInfo.Length / (1024.0 * 1024.0):F1} MB");

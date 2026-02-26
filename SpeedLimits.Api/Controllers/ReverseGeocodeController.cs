@@ -106,6 +106,111 @@ public class ReverseGeocodeController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Validates reverse geocode results against expected trip location data.
+    /// Accepts an Elasticsearch-style hits array; compares startLocationAddress
+    /// (road, place, region) against our geocoder output.
+    /// isMatch = road matched AND city matched.
+    /// </summary>
+    [HttpPost("validate")]
+    [ProducesResponseType(typeof(TripValidationResponse), 200)]
+    [ProducesResponseType(400)]
+    [ProducesResponseType(404)]
+    public IActionResult Validate([FromBody] TripValidationRequest request)
+    {
+        if (request.Hits == null || request.Hits.Count == 0)
+            return BadRequest(new { error = "Hits list must contain at least one item." });
+
+        var dbPath = _pathResolver.GetCountryDbPath(request.CountryCode);
+        if (dbPath == null)
+            return NotFound(new { error = $"Database for country '{request.CountryCode}' not found." });
+
+        using var speedLookup = new SpeedLimitLookup(dbPath);
+        var batchTimer = Stopwatch.StartNew();
+        var results = new List<TripValidationResultItem>(request.Hits.Count);
+        int matchCount = 0;
+
+        foreach (var hit in request.Hits)
+        {
+            var src = hit.Source;
+            var addr = src.StartLocationAddress;
+            var tripId = !string.IsNullOrEmpty(hit.Id) ? hit.Id : src.Id;
+
+            if (!ValidateCoordinates(addr.Latitude, addr.Longitude, out var coordError))
+            {
+                results.Add(new TripValidationResultItem
+                {
+                    TripId = tripId,
+                    TripStartTimestamp = src.TripStartTimestamp,
+                    TripEndTimestamp = src.TripEndTimestamp,
+                    StartLocationAddress = new TripValidationAddress
+                    {
+                        Latitude = addr.Latitude,
+                        Longitude = addr.Longitude,
+                        Road = addr.Address,
+                        Place = addr.Place,
+                        Region = addr.Region
+                    },
+                    ActualRoad = $"[invalid coordinates: {coordError}]",
+                    IsMatch = false
+                });
+                continue;
+            }
+
+            var itemTimer = Stopwatch.StartNew();
+            var geo = PerformLookup(dbPath, request.CountryCode.ToUpper(), addr.Latitude, addr.Longitude, itemTimer, speedLookup);
+
+            // Road: prefer postal Street (addr:street), fall back to NearestRoad
+            var resolvedStreet = geo.Street ?? geo.NearestRoad;
+
+            // Expected address (with house number) should contain the actual street name
+            bool roadMatched = !string.IsNullOrEmpty(addr.Address)
+                && !string.IsNullOrEmpty(resolvedStreet)
+                && addr.Address.Contains(resolvedStreet, StringComparison.OrdinalIgnoreCase);
+
+            // City: either value contains the other (handles "Greater Sydney" vs "Sydney" etc.)
+            bool cityMatched = !string.IsNullOrEmpty(addr.Place)
+                && !string.IsNullOrEmpty(geo.City)
+                && (geo.City.Contains(addr.Place, StringComparison.OrdinalIgnoreCase)
+                    || addr.Place.Contains(geo.City, StringComparison.OrdinalIgnoreCase));
+
+            bool isMatch = roadMatched && cityMatched;
+            if (isMatch) matchCount++;
+
+            results.Add(new TripValidationResultItem
+            {
+                TripId = tripId,
+                TripStartTimestamp = src.TripStartTimestamp,
+                TripEndTimestamp = src.TripEndTimestamp,
+                StartLocationAddress = new TripValidationAddress
+                {
+                    Latitude = addr.Latitude,
+                    Longitude = addr.Longitude,
+                    Road = addr.Address,
+                    Place = addr.Place,
+                    Region = addr.Region
+                },
+                ActualRoad = resolvedStreet,
+                ActualNearestRoad = geo.NearestRoad,
+                ActualCity = geo.City,
+                ActualMunicipality = geo.Municipality,
+                ActualRegion = geo.Region,
+                IsMatch = isMatch
+            });
+        }
+
+        batchTimer.Stop();
+
+        return Ok(new TripValidationResponse
+        {
+            CountryCode = request.CountryCode.ToUpper(),
+            RequestCount = request.Hits.Count,
+            MatchCount = matchCount,
+            TotalTimeMs = batchTimer.Elapsed.TotalMilliseconds,
+            Results = results
+        });
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static ReverseGeocodeResponse PerformLookup(
@@ -124,14 +229,21 @@ public class ReverseGeocodeController : ControllerBase
             CountryCode = countryCode,
             HasPlaceData = geocoder.HasPlaceData,
             Street = result.Street,
+            NearestRoad = result.NearestRoad,
             HighwayType = result.HighwayType,
-            StreetDistanceMeters = result.Street != null ? result.StreetDistanceM : null,
+            NearestRoadDistanceMeters = result.NearestRoad != null ? result.NearestRoadDistanceM : null,
             Suburb = result.Suburb,
             SuburbType = result.SuburbType,
             SuburbDistanceMeters = result.Suburb != null ? result.SuburbDistanceM : null,
             City = result.City,
             CityType = result.CityType,
             CityDistanceMeters = result.City != null ? result.CityDistanceM : null,
+            Municipality = result.Municipality,
+            MunicipalityType = result.MunicipalityType,
+            MunicipalityDistanceMeters = result.Municipality != null ? result.MunicipalityDistanceM : null,
+            Region = result.Region,
+            RegionType = result.RegionType,
+            RegionDistanceMeters = result.Region != null ? result.RegionDistanceM : null,
             SpeedLimitKmh = roadInfo?.SpeedLimitKmh,
             IsSpeedLimitInferred = roadInfo?.IsInferred,
             ElapsedMs = sw.Elapsed.TotalMilliseconds

@@ -7,7 +7,10 @@ using OsmDataAcquisition.Utilities;
 namespace OsmDataAcquisition.Services;
 
 /// <summary>
-/// Extracts road segments with speed limits from OSM PBF files using two-pass algorithm
+/// Extracts road segments, place nodes and boundary polygons from OSM PBF files.
+/// Pass 1: collect all node coordinates + place nodes
+/// Pass 2: process ways (roads) + collect boundary relations
+/// Pass 3: re-stream PBF to collect boundary way node-lists, then assemble polygons
 /// </summary>
 public class OsmRoadExtractor
 {
@@ -25,7 +28,16 @@ public class OsmRoadExtractor
         "city", "town", "suburb", "village", "hamlet", "neighbourhood"
     };
 
+    private static readonly HashSet<string> BoundaryPlaceTypes = new()
+    {
+        "city", "town", "suburb", "village", "hamlet", "neighbourhood"
+    };
+
     public List<PlaceNode> PlaceNodes { get; private set; } = new();
+    public List<PlaceBoundary> PlaceBoundaries { get; private set; } = new();
+
+    // Collected during pass 2, consumed after all roads are yielded
+    private List<BoundaryRelationInfo> _boundaryRelations = new();
 
     public OsmRoadExtractor(CountryConfig countryConfig)
     {
@@ -33,20 +45,21 @@ public class OsmRoadExtractor
     }
 
     /// <summary>
-    /// Extracts road segments from PBF file
+    /// Extracts road segments from PBF file.
+    /// After all road segments are consumed (.ToList()), PlaceNodes and PlaceBoundaries are populated.
     /// </summary>
     public IEnumerable<RoadSegment> ExtractRoadSegments(string pbfFilePath)
     {
-        ConsoleProgressReporter.Report("Starting two-pass OSM extraction...");
+        ConsoleProgressReporter.Report("Starting multi-pass OSM extraction...");
 
         // Pass 1: Collect all nodes
         var nodes = CollectNodes(pbfFilePath);
         ConsoleProgressReporter.Report($"Pass 1 complete: Collected {nodes.Count:N0} nodes");
 
-        // Pass 2: Process ways and build road segments
-        ConsoleProgressReporter.Report("Pass 2: Processing ways...");
+        // Pass 2: Process ways (yield roads) + collect boundary relations
+        ConsoleProgressReporter.Report("Pass 2: Processing ways and collecting boundary relations...");
         var roadCount = 0;
-        foreach (var roadSegment in ProcessWays(pbfFilePath, nodes))
+        foreach (var roadSegment in ProcessWaysAndCollectRelations(pbfFilePath, nodes))
         {
             roadCount++;
             if (roadCount % 10000 == 0)
@@ -56,8 +69,13 @@ public class OsmRoadExtractor
             yield return roadSegment;
         }
 
-        ConsoleProgressReporter.Report($"Pass 2 complete: Extracted {roadCount:N0} road segments");
+        ConsoleProgressReporter.Report($"Pass 2 complete: Extracted {roadCount:N0} road segments, found {_boundaryRelations.Count:N0} boundary relations");
+
+        // Pass 3 + assembly: build boundary polygons (runs after all roads are consumed)
+        BuildBoundaryPolygons(pbfFilePath, nodes);
     }
+
+    // ── Pass 1: node collection ──────────────────────────────────────────────
 
     /// <summary>
     /// Pass 1: Collects all node coordinates into a dictionary (stores only lat/lon, not full Node objects)
@@ -115,11 +133,17 @@ public class OsmRoadExtractor
         return nodes;
     }
 
+    // ── Pass 2: ways (roads) + relations (boundaries) ────────────────────────
+
     /// <summary>
-    /// Pass 2: Processes ways and builds road segments
+    /// Pass 2: Processes ways for road segments (yielded) and also collects boundary
+    /// relations that appear after ways in the PBF stream.
     /// </summary>
-    private IEnumerable<RoadSegment> ProcessWays(string pbfFilePath, Dictionary<long, (double Lat, double Lon)> nodes)
+    private IEnumerable<RoadSegment> ProcessWaysAndCollectRelations(
+        string pbfFilePath, Dictionary<long, (double Lat, double Lon)> nodes)
     {
+        var boundaryRelations = new List<BoundaryRelationInfo>();
+
         using var fileStream = File.OpenRead(pbfFilePath);
         var source = new PBFOsmStreamSource(fileStream);
 
@@ -158,32 +182,278 @@ public class OsmRoadExtractor
                 roadSegment.CalculateBounds();
                 yield return roadSegment;
             }
+            else if (element.Type == OsmGeoType.Relation)
+            {
+                var relation = (Relation)element;
+                if (relation.Tags == null || relation.Members == null)
+                    continue;
+
+                var info = TryParseBoundaryRelation(relation);
+                if (info != null)
+                    boundaryRelations.Add(info);
+            }
         }
+
+        _boundaryRelations = boundaryRelations;
     }
 
     /// <summary>
-    /// Extracts or infers speed limit from way tags
+    /// Checks if a relation is a boundary we care about and extracts its metadata + member way IDs.
     /// </summary>
+    private static BoundaryRelationInfo? TryParseBoundaryRelation(Relation relation)
+    {
+        var tags = relation.Tags;
+        if (tags == null) return null;
+
+        // Must be a boundary relation
+        bool isBoundary = tags.TryGetValue("boundary", out var boundaryValue)
+                          && boundaryValue == "administrative";
+        bool hasPlaceTag = tags.TryGetValue("place", out var placeValue)
+                           && BoundaryPlaceTypes.Contains(placeValue);
+
+        if (!isBoundary && !hasPlaceTag)
+            return null;
+
+        // Must have a name
+        if (!tags.TryGetValue("name", out var name) || string.IsNullOrWhiteSpace(name))
+            return null;
+
+        // Parse admin_level
+        int adminLevel = 0;
+        if (tags.TryGetValue("admin_level", out var levelStr))
+            int.TryParse(levelStr, out adminLevel);
+
+        // Filter: only admin_level >= 6 (skip country/state borders), or place-tagged
+        if (!hasPlaceTag && adminLevel < 6)
+            return null;
+
+        // Determine boundary type
+        string boundaryType;
+        if (hasPlaceTag)
+        {
+            boundaryType = placeValue!;
+        }
+        else
+        {
+            boundaryType = adminLevel switch
+            {
+                <= 7 => "city",
+                _ => "suburb"
+            };
+        }
+
+        // Collect outer member way IDs
+        var outerWayIds = new List<long>();
+        foreach (var member in relation.Members)
+        {
+            if (member.Type == OsmGeoType.Way &&
+                (member.Role is null or "" or "outer"))
+            {
+                outerWayIds.Add(member.Id);
+            }
+        }
+
+        if (outerWayIds.Count == 0)
+            return null;
+
+        return new BoundaryRelationInfo
+        {
+            RelationId = relation.Id ?? 0,
+            Name = name,
+            BoundaryType = boundaryType,
+            AdminLevel = adminLevel,
+            OuterWayIds = outerWayIds
+        };
+    }
+
+    // ── Pass 3 + assembly: boundary polygons ────────────────────────────────
+
+    /// <summary>
+    /// Pass 3: Re-streams the PBF to collect node-lists for boundary member ways,
+    /// then assembles them into closed polygon rings.
+    /// </summary>
+    private void BuildBoundaryPolygons(
+        string pbfFilePath, Dictionary<long, (double Lat, double Lon)> nodes)
+    {
+        if (_boundaryRelations.Count == 0)
+        {
+            PlaceBoundaries = new List<PlaceBoundary>();
+            return;
+        }
+
+        // Build set of all way IDs we need
+        var neededWayIds = new HashSet<long>();
+        foreach (var rel in _boundaryRelations)
+            foreach (var wayId in rel.OuterWayIds)
+                neededWayIds.Add(wayId);
+
+        ConsoleProgressReporter.Report($"Pass 3: Collecting {neededWayIds.Count:N0} boundary ways...");
+
+        // Stream PBF again, only collecting ways whose IDs are in the needed set
+        var wayNodeLists = new Dictionary<long, long[]>(neededWayIds.Count);
+
+        using (var fileStream = File.OpenRead(pbfFilePath))
+        {
+            var source = new PBFOsmStreamSource(fileStream);
+            foreach (var element in source)
+            {
+                if (element.Type == OsmGeoType.Way)
+                {
+                    var way = (Way)element;
+                    if (way.Id.HasValue && neededWayIds.Contains(way.Id.Value) && way.Nodes != null)
+                    {
+                        wayNodeLists[way.Id.Value] = way.Nodes;
+                    }
+                }
+            }
+        }
+
+        ConsoleProgressReporter.Report($"Collected {wayNodeLists.Count:N0} boundary ways. Assembling polygons...");
+
+        // Assemble polygons from relations
+        var boundaries = new List<PlaceBoundary>();
+        var assembled = 0;
+        var failed = 0;
+
+        foreach (var rel in _boundaryRelations)
+        {
+            // Gather the way node-lists for this relation's outer members
+            var memberWays = new List<long[]>();
+            foreach (var wayId in rel.OuterWayIds)
+            {
+                if (wayNodeLists.TryGetValue(wayId, out var nodeList))
+                    memberWays.Add(nodeList);
+            }
+
+            if (memberWays.Count == 0)
+            {
+                failed++;
+                continue;
+            }
+
+            // Assemble into a closed ring of node IDs
+            var ring = AssembleRing(memberWays);
+            if (ring == null || ring.Count < 4) // minimum 3 unique points + closing point
+            {
+                failed++;
+                continue;
+            }
+
+            // Resolve node IDs to coordinates
+            var polygon = new List<GeoPoint>(ring.Count);
+            var allResolved = true;
+            foreach (var nodeId in ring)
+            {
+                if (nodes.TryGetValue(nodeId, out var coords))
+                {
+                    polygon.Add(new GeoPoint(coords.Lat, coords.Lon));
+                }
+                else
+                {
+                    allResolved = false;
+                    break;
+                }
+            }
+
+            if (!allResolved || polygon.Count < 4)
+            {
+                failed++;
+                continue;
+            }
+
+            var boundary = new PlaceBoundary
+            {
+                OsmRelationId = rel.RelationId,
+                Name = rel.Name,
+                BoundaryType = rel.BoundaryType,
+                AdminLevel = rel.AdminLevel,
+                Polygon = polygon
+            };
+            boundary.CalculateBounds();
+            boundaries.Add(boundary);
+            assembled++;
+        }
+
+        PlaceBoundaries = boundaries;
+        ConsoleProgressReporter.Report(
+            $"Boundary assembly complete: {assembled:N0} polygons built, {failed:N0} skipped");
+    }
+
+    /// <summary>
+    /// Connects a list of ordered way node-arrays into a single closed ring.
+    /// Ways may need to be reversed to connect end-to-end.
+    /// Returns null if a closed ring cannot be formed.
+    /// </summary>
+    private static List<long>? AssembleRing(List<long[]> ways)
+    {
+        if (ways.Count == 0)
+            return null;
+
+        // Start with the first way
+        var ring = new List<long>(ways[0]);
+        var used = new bool[ways.Count];
+        used[0] = true;
+        var usedCount = 1;
+
+        while (usedCount < ways.Count)
+        {
+            var lastNode = ring[^1];
+            var found = false;
+
+            for (int i = 0; i < ways.Count; i++)
+            {
+                if (used[i]) continue;
+                var way = ways[i];
+                if (way.Length == 0) continue;
+
+                if (way[0] == lastNode)
+                {
+                    // Append forward, skipping the duplicate join node
+                    for (int k = 1; k < way.Length; k++)
+                        ring.Add(way[k]);
+                    used[i] = true;
+                    usedCount++;
+                    found = true;
+                    break;
+                }
+                else if (way[^1] == lastNode)
+                {
+                    // Append reversed, skipping the duplicate join node
+                    for (int k = way.Length - 2; k >= 0; k--)
+                        ring.Add(way[k]);
+                    used[i] = true;
+                    usedCount++;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                break; // Cannot connect further
+        }
+
+        // Check if the ring is closed (first node == last node)
+        if (ring.Count >= 4 && ring[0] == ring[^1])
+            return ring;
+
+        return null; // Not a valid closed ring
+    }
+
+    // ── Shared helpers ──────────────────────────────────────────────────────
+
     private (int speedLimit, bool isInferred) ExtractSpeedLimit(Way way, string highwayType)
     {
-        // Check for explicit maxspeed tag
         if (way.Tags != null && way.Tags.TryGetValue("maxspeed", out var maxspeedStr))
         {
             var speedLimit = ParseSpeedLimit(maxspeedStr);
             if (speedLimit.HasValue)
-            {
-                return (speedLimit.Value, false); // Explicit
-            }
+                return (speedLimit.Value, false);
         }
 
-        // Infer from highway type
         var inferredSpeed = _countryConfig.GetDefaultSpeedLimit(highwayType);
         return (inferredSpeed, true);
     }
 
-    /// <summary>
-    /// Parses speed limit string (handles various formats)
-    /// </summary>
     private int? ParseSpeedLimit(string maxspeedStr)
     {
         if (string.IsNullOrWhiteSpace(maxspeedStr))
@@ -191,37 +461,27 @@ public class OsmRoadExtractor
 
         maxspeedStr = maxspeedStr.Trim().ToLower();
 
-        // Handle special cases
         if (maxspeedStr == "none" || maxspeedStr == "signals")
-        {
-            // "none" typically means national speed limit
             return _countryConfig.Code == "ZA" ? 120 : 110;
-        }
 
         if (maxspeedStr == "walk")
             return 5;
 
-        // Remove common suffixes
         maxspeedStr = maxspeedStr
             .Replace("km/h", "")
             .Replace("kmh", "")
             .Replace("kph", "")
             .Replace(" ", "");
 
-        // Handle mph (convert to km/h)
         if (maxspeedStr.EndsWith("mph"))
         {
             maxspeedStr = maxspeedStr.Replace("mph", "");
             if (int.TryParse(maxspeedStr, out var mph))
-            {
                 return (int)Math.Round(mph * 1.60934);
-            }
         }
 
-        // Parse numeric value
         if (int.TryParse(maxspeedStr, out var kmh))
         {
-            // Sanity check (5-200 km/h range)
             if (kmh >= 5 && kmh <= 200)
                 return kmh;
         }
@@ -229,9 +489,6 @@ public class OsmRoadExtractor
         return null;
     }
 
-    /// <summary>
-    /// Builds geometry list from way nodes
-    /// </summary>
     private List<GeoPoint> BuildGeometry(Way way, Dictionary<long, (double Lat, double Lon)> nodes)
     {
         var geometry = new List<GeoPoint>();
@@ -242,11 +499,20 @@ public class OsmRoadExtractor
         foreach (var nodeId in way.Nodes)
         {
             if (nodes.TryGetValue(nodeId, out var coords))
-            {
                 geometry.Add(new GeoPoint(coords.Lat, coords.Lon));
-            }
         }
 
         return geometry;
+    }
+
+    // ── Private types ───────────────────────────────────────────────────────
+
+    private class BoundaryRelationInfo
+    {
+        public long RelationId;
+        public string Name = string.Empty;
+        public string BoundaryType = string.Empty;
+        public int AdminLevel;
+        public List<long> OuterWayIds = new();
     }
 }

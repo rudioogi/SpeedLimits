@@ -4,7 +4,9 @@ using OsmDataAcquisition.Models;
 namespace OsmDataAcquisition.Services;
 
 /// <summary>
-/// Reverse geocodes GPS coordinates to street/suburb/city using the speed limit database
+/// Reverse geocodes GPS coordinates to street/suburb/city using the speed limit database.
+/// Prefers polygon containment (place_boundaries table) for suburb/city lookups.
+/// Falls back to nearest place node if no containing polygon is found.
 /// </summary>
 public class ReverseGeocoder : IDisposable
 {
@@ -12,7 +14,10 @@ public class ReverseGeocoder : IDisposable
     private readonly SqliteCommand _streetCmd;
     private readonly SqliteCommand _suburbCmd;
     private readonly SqliteCommand _cityCmd;
+    private readonly SqliteCommand? _suburbBoundaryCmd;
+    private readonly SqliteCommand? _cityBoundaryCmd;
     private readonly bool _hasPlacesTable;
+    private readonly bool _hasBoundariesTable;
 
     // Search radii in degrees (approximate):
     // ~550m at equator  = 0.005 degrees
@@ -27,10 +32,11 @@ public class ReverseGeocoder : IDisposable
         _connection = new SqliteConnection($"Data Source={databasePath};Mode=ReadOnly");
         _connection.Open();
 
-        // Check if places table exists (backward compatibility)
+        // Backward-compatible table checks
         _hasPlacesTable = TableExists("places");
+        _hasBoundariesTable = TableExists("place_boundaries");
 
-        // Prepared query: nearest named road within ~550m
+        // ── Street: nearest named road ───────────────────────────────────────
         _streetCmd = _connection.CreateCommand();
         _streetCmd.CommandText = @"
             SELECT name, highway_type, center_lat, center_lon
@@ -46,7 +52,7 @@ public class ReverseGeocoder : IDisposable
         _streetCmd.Parameters.Add("@lon", SqliteType.Real);
         _streetCmd.Parameters.Add("@radius", SqliteType.Real);
 
-        // Prepared query: nearest suburb/neighbourhood/village/hamlet within ~5.5km
+        // ── Suburb: nearest place node (fallback) ────────────────────────────
         _suburbCmd = _connection.CreateCommand();
         _suburbCmd.CommandText = @"
             SELECT name, place_type, latitude, longitude
@@ -62,7 +68,7 @@ public class ReverseGeocoder : IDisposable
         _suburbCmd.Parameters.Add("@lon", SqliteType.Real);
         _suburbCmd.Parameters.Add("@radius", SqliteType.Real);
 
-        // Prepared query: nearest city/town within ~33km
+        // ── City: nearest place node (fallback) ──────────────────────────────
         _cityCmd = _connection.CreateCommand();
         _cityCmd.CommandText = @"
             SELECT name, place_type, latitude, longitude
@@ -77,19 +83,48 @@ public class ReverseGeocoder : IDisposable
         _cityCmd.Parameters.Add("@lat", SqliteType.Real);
         _cityCmd.Parameters.Add("@lon", SqliteType.Real);
         _cityCmd.Parameters.Add("@radius", SqliteType.Real);
+
+        // ── Polygon-based commands (only if table exists) ────────────────────
+        if (_hasBoundariesTable)
+        {
+            // Suburb polygon: candidates whose bbox contains the point, smallest area first
+            _suburbBoundaryCmd = _connection.CreateCommand();
+            _suburbBoundaryCmd.CommandText = @"
+                SELECT name, boundary_type, polygon_blob
+                FROM place_boundaries
+                WHERE boundary_type IN ('suburb', 'neighbourhood', 'village', 'hamlet')
+                  AND min_lat <= @lat AND max_lat >= @lat
+                  AND min_lon <= @lon AND max_lon >= @lon
+                ORDER BY (max_lat - min_lat) * (max_lon - min_lon) ASC";
+            _suburbBoundaryCmd.Parameters.Add("@lat", SqliteType.Real);
+            _suburbBoundaryCmd.Parameters.Add("@lon", SqliteType.Real);
+
+            // City polygon: candidates whose bbox contains the point, smallest area first
+            _cityBoundaryCmd = _connection.CreateCommand();
+            _cityBoundaryCmd.CommandText = @"
+                SELECT name, boundary_type, polygon_blob
+                FROM place_boundaries
+                WHERE boundary_type IN ('city', 'town')
+                  AND min_lat <= @lat AND max_lat >= @lat
+                  AND min_lon <= @lon AND max_lon >= @lon
+                ORDER BY (max_lat - min_lat) * (max_lon - min_lon) ASC";
+            _cityBoundaryCmd.Parameters.Add("@lat", SqliteType.Real);
+            _cityBoundaryCmd.Parameters.Add("@lon", SqliteType.Real);
+        }
     }
 
-    public bool HasPlaceData => _hasPlacesTable;
+    public bool HasPlaceData => _hasPlacesTable || _hasBoundariesTable;
 
     /// <summary>
-    /// Reverse geocode coordinates to street, suburb, and city
+    /// Reverse geocode coordinates to street, suburb, and city.
+    /// Uses polygon containment first; falls back to nearest place node.
     /// </summary>
     public ReverseGeocodeResult Lookup(double latitude, double longitude)
     {
         var result = new ReverseGeocodeResult();
         var queryPoint = new GeoPoint(latitude, longitude);
 
-        // Street lookup (from road_segments)
+        // ── Street lookup (always from road_segments) ────────────────────────
         _streetCmd.Parameters["@lat"].Value = latitude;
         _streetCmd.Parameters["@lon"].Value = longitude;
         _streetCmd.Parameters["@radius"].Value = StreetRadiusDeg;
@@ -105,17 +140,24 @@ public class ReverseGeocoder : IDisposable
             }
         }
 
-        // Suburb and city lookups require places table
-        if (!_hasPlacesTable)
-            return result;
-
-        // Suburb lookup
-        _suburbCmd.Parameters["@lat"].Value = latitude;
-        _suburbCmd.Parameters["@lon"].Value = longitude;
-        _suburbCmd.Parameters["@radius"].Value = SuburbRadiusDeg;
-
-        using (var reader = _suburbCmd.ExecuteReader())
+        // ── Suburb lookup: polygon first, then nearest-point fallback ────────
+        if (_hasBoundariesTable)
         {
+            var suburb = FindContainingBoundary(_suburbBoundaryCmd!, latitude, longitude);
+            if (suburb != null)
+            {
+                result.Suburb = suburb.Value.Name;
+                result.SuburbType = suburb.Value.BoundaryType + " (polygon)";
+                result.SuburbDistanceM = 0; // point is inside the boundary
+            }
+        }
+        if (result.Suburb == null && _hasPlacesTable)
+        {
+            _suburbCmd.Parameters["@lat"].Value = latitude;
+            _suburbCmd.Parameters["@lon"].Value = longitude;
+            _suburbCmd.Parameters["@radius"].Value = SuburbRadiusDeg;
+
+            using var reader = _suburbCmd.ExecuteReader();
             if (reader.Read())
             {
                 result.Suburb = reader.GetString(0);
@@ -125,13 +167,24 @@ public class ReverseGeocoder : IDisposable
             }
         }
 
-        // City lookup
-        _cityCmd.Parameters["@lat"].Value = latitude;
-        _cityCmd.Parameters["@lon"].Value = longitude;
-        _cityCmd.Parameters["@radius"].Value = CityRadiusDeg;
-
-        using (var reader = _cityCmd.ExecuteReader())
+        // ── City lookup: polygon first, then nearest-point fallback ──────────
+        if (_hasBoundariesTable)
         {
+            var city = FindContainingBoundary(_cityBoundaryCmd!, latitude, longitude);
+            if (city != null)
+            {
+                result.City = city.Value.Name;
+                result.CityType = city.Value.BoundaryType + " (polygon)";
+                result.CityDistanceM = 0;
+            }
+        }
+        if (result.City == null && _hasPlacesTable)
+        {
+            _cityCmd.Parameters["@lat"].Value = latitude;
+            _cityCmd.Parameters["@lon"].Value = longitude;
+            _cityCmd.Parameters["@radius"].Value = CityRadiusDeg;
+
+            using var reader = _cityCmd.ExecuteReader();
             if (reader.Read())
             {
                 result.City = reader.GetString(0);
@@ -143,6 +196,77 @@ public class ReverseGeocoder : IDisposable
 
         return result;
     }
+
+    // ── Polygon helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Queries candidate boundaries whose bounding box contains the point,
+    /// then tests each polygon with ray-casting. Returns the first match
+    /// (smallest area due to ORDER BY).
+    /// </summary>
+    private static (string Name, string BoundaryType)? FindContainingBoundary(
+        SqliteCommand cmd, double lat, double lon)
+    {
+        cmd.Parameters["@lat"].Value = lat;
+        cmd.Parameters["@lon"].Value = lon;
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var blob = (byte[])reader["polygon_blob"];
+            var polygon = DeserializePolygon(blob);
+
+            if (PointInPolygon(lat, lon, polygon))
+            {
+                return (reader.GetString(0), reader.GetString(1));
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Deserialises the compact binary blob back into a list of GeoPoints.
+    /// Format: [int32 count][double lat₁][double lon₁]…
+    /// </summary>
+    internal static List<GeoPoint> DeserializePolygon(byte[] blob)
+    {
+        var count = BitConverter.ToInt32(blob, 0);
+        var points = new List<GeoPoint>(count);
+        var offset = 4;
+        for (int i = 0; i < count; i++)
+        {
+            var lat = BitConverter.ToDouble(blob, offset); offset += 8;
+            var lon = BitConverter.ToDouble(blob, offset); offset += 8;
+            points.Add(new GeoPoint(lat, lon));
+        }
+        return points;
+    }
+
+    /// <summary>
+    /// Ray-casting point-in-polygon test. Treats latitude as Y, longitude as X.
+    /// Accurate for city/suburb-scale polygons where earth curvature is negligible.
+    /// </summary>
+    internal static bool PointInPolygon(double lat, double lon, List<GeoPoint> polygon)
+    {
+        var inside = false;
+        for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
+        {
+            var yi = polygon[i].Latitude;
+            var xi = polygon[i].Longitude;
+            var yj = polygon[j].Latitude;
+            var xj = polygon[j].Longitude;
+
+            if ((yi > lat) != (yj > lat) &&
+                lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    // ── Utility ─────────────────────────────────────────────────────────────
 
     private bool TableExists(string tableName)
     {
@@ -158,6 +282,8 @@ public class ReverseGeocoder : IDisposable
         _streetCmd?.Dispose();
         _suburbCmd?.Dispose();
         _cityCmd?.Dispose();
+        _suburbBoundaryCmd?.Dispose();
+        _cityBoundaryCmd?.Dispose();
         _connection?.Dispose();
     }
 }

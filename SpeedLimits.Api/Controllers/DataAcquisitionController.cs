@@ -125,7 +125,7 @@ public class DataAcquisitionController : ControllerBase
                 $"{country.Code.ToLower()}_speedlimits.db");
 
             var builder = new DatabaseBuilder(_dbConfig, country);
-            builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes);
+            builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);
 
             // Step 4: Validate
             var validator = new ValidationHelper(databasePath);

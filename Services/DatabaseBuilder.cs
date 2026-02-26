@@ -23,7 +23,8 @@ public class DatabaseBuilder
     /// Builds complete database from road segments
     /// </summary>
     public void BuildDatabase(string databasePath, IEnumerable<RoadSegment> roadSegments,
-        IReadOnlyList<PlaceNode>? placeNodes = null)
+        IReadOnlyList<PlaceNode>? placeNodes = null,
+        IReadOnlyList<PlaceBoundary>? placeBoundaries = null)
     {
         ConsoleProgressReporter.Report("Building SQLite database...");
 
@@ -55,8 +56,15 @@ public class DatabaseBuilder
                 placeCount = InsertPlaceData(connection, placeNodes);
             }
 
+            // Insert boundary polygons
+            var boundaryCount = 0;
+            if (placeBoundaries != null && placeBoundaries.Count > 0)
+            {
+                boundaryCount = InsertBoundaryData(connection, placeBoundaries);
+            }
+
             // Insert metadata
-            InsertMetadata(connection, worldBounds, placeCount);
+            InsertMetadata(connection, worldBounds, placeCount, boundaryCount);
 
             transaction.Commit();
             ConsoleProgressReporter.Report("Transaction committed successfully");
@@ -139,11 +147,27 @@ public class DatabaseBuilder
                 longitude REAL NOT NULL
             )");
 
+        // Place boundary polygons (for point-in-polygon reverse geocoding)
+        ExecuteNonQuery(connection, @"
+            CREATE TABLE place_boundaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                osm_relation_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                boundary_type TEXT NOT NULL,
+                admin_level INTEGER NOT NULL,
+                min_lat REAL NOT NULL,
+                max_lat REAL NOT NULL,
+                min_lon REAL NOT NULL,
+                max_lon REAL NOT NULL,
+                polygon_blob BLOB NOT NULL
+            )");
+
         // Create indexes (only those used by lookup queries)
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_bounds ON road_segments(min_lat, max_lat, min_lon, max_lon)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_road_segments_center ON road_segments(center_lat, center_lon)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_spatial_grid_cells ON spatial_grid(grid_x, grid_y)");
         ExecuteNonQuery(connection, "CREATE INDEX idx_places_type_coords ON places(place_type, latitude, longitude)");
+        ExecuteNonQuery(connection, "CREATE INDEX idx_place_boundaries_bbox ON place_boundaries(boundary_type, min_lat, max_lat, min_lon, max_lon)");
     }
 
     /// <summary>
@@ -320,9 +344,72 @@ public class DatabaseBuilder
     }
 
     /// <summary>
+    /// Inserts boundary polygon data with blob-serialised coordinates.
+    /// Blob format: [int32 vertexCount][double lat₁][double lon₁]…
+    /// </summary>
+    private int InsertBoundaryData(SqliteConnection connection, IReadOnlyList<PlaceBoundary> boundaries)
+    {
+        var progress = new ConsoleProgressReporter("Inserting boundary polygons");
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO place_boundaries
+                (osm_relation_id, name, boundary_type, admin_level, min_lat, max_lat, min_lon, max_lon, polygon_blob)
+            VALUES
+                (@rid, @name, @btype, @alevel, @minlat, @maxlat, @minlon, @maxlon, @blob)";
+
+        var pRid    = cmd.Parameters.Add("@rid",    SqliteType.Integer);
+        var pName   = cmd.Parameters.Add("@name",   SqliteType.Text);
+        var pBtype  = cmd.Parameters.Add("@btype",  SqliteType.Text);
+        var pAlevel = cmd.Parameters.Add("@alevel",  SqliteType.Integer);
+        var pMinLat = cmd.Parameters.Add("@minlat", SqliteType.Real);
+        var pMaxLat = cmd.Parameters.Add("@maxlat", SqliteType.Real);
+        var pMinLon = cmd.Parameters.Add("@minlon", SqliteType.Real);
+        var pMaxLon = cmd.Parameters.Add("@maxlon", SqliteType.Real);
+        var pBlob   = cmd.Parameters.Add("@blob",   SqliteType.Blob);
+
+        var count = 0;
+        foreach (var b in boundaries)
+        {
+            pRid.Value    = b.OsmRelationId;
+            pName.Value   = b.Name;
+            pBtype.Value  = b.BoundaryType;
+            pAlevel.Value = b.AdminLevel;
+            pMinLat.Value = b.MinLat;
+            pMaxLat.Value = b.MaxLat;
+            pMinLon.Value = b.MinLon;
+            pMaxLon.Value = b.MaxLon;
+            pBlob.Value   = SerializePolygon(b.Polygon);
+            cmd.ExecuteNonQuery();
+            count++;
+        }
+
+        progress.Complete($"{count:N0} boundary polygons inserted");
+        return count;
+    }
+
+    /// <summary>
+    /// Serialises a polygon to a compact binary blob:
+    /// [int32 vertexCount][double lat₁][double lon₁][double lat₂][double lon₂]…
+    /// </summary>
+    internal static byte[] SerializePolygon(List<GeoPoint> polygon)
+    {
+        var blob = new byte[4 + polygon.Count * 16];
+        BitConverter.TryWriteBytes(blob.AsSpan(0, 4), polygon.Count);
+        var offset = 4;
+        foreach (var p in polygon)
+        {
+            BitConverter.TryWriteBytes(blob.AsSpan(offset, 8), p.Latitude);  offset += 8;
+            BitConverter.TryWriteBytes(blob.AsSpan(offset, 8), p.Longitude); offset += 8;
+        }
+        return blob;
+    }
+
+    /// <summary>
     /// Inserts metadata
     /// </summary>
-    private void InsertMetadata(SqliteConnection connection, Bounds worldBounds, int placeCount = 0)
+    private void InsertMetadata(SqliteConnection connection, Bounds worldBounds,
+        int placeCount = 0, int boundaryCount = 0)
     {
         var metadata = new Dictionary<string, string>
         {
@@ -335,7 +422,8 @@ public class DatabaseBuilder
             ["min_longitude"] = worldBounds.MinLongitude.ToString("F6"),
             ["max_longitude"] = worldBounds.MaxLongitude.ToString("F6"),
             ["osm_source"] = _countryConfig.GeofabrikUrl,
-            ["place_count"] = placeCount.ToString()
+            ["place_count"] = placeCount.ToString(),
+            ["boundary_count"] = boundaryCount.ToString()
         };
 
         using var cmd = connection.CreateCommand();

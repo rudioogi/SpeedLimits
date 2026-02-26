@@ -617,7 +617,7 @@ class Program
             $"{country.Code.ToLower()}_speedlimits.db");
 
         var builder = new DatabaseBuilder(dbConfig, country);
-        builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes);
+        builder.BuildDatabase(databasePath, roadSegments, extractor.PlaceNodes, extractor.PlaceBoundaries);
 
         var dbFileInfo = new FileInfo(databasePath);
         Console.WriteLine($"Database size: {dbFileInfo.Length / (1024.0 * 1024.0):F1} MB");
